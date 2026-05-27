@@ -32,7 +32,7 @@ set_property PACKAGE_PIN AC11 [get_ports {som240_2_connector_sfp_iic_sda_io}]
 #set_property IOSTANDARD LVCMOS33 [get_ports {sfp_mod_abs[0]}]
 #set_property PACKAGE_PIN AA11 [get_ports {sfp_mod_abs[0]}]
 
-# timing contraints
+# timing constraints
 set_false_path -to [get_ports {som240_2_connector_sfp_iic_scl_io*}]
 set_false_path -to [get_ports {som240_2_connector_sfp_iic_sda_io*}]
 set_false_path -from [get_ports {som240_2_connector_sfp_iic_scl_io*}]

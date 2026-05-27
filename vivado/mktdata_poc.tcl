@@ -18,7 +18,7 @@
 # NOTE: In order to use this script for source control purposes, please make sure that the
 #       following files are added to the source control system:-
 #
-# 1. This project restoration tcl script (kr260_starter_kit.tcl) that was generated.
+# 1. This project restoration tcl script (mktdata_poc.tcl) that was generated.
 #
 # 2. The following source files (all local to this directory):
 #
@@ -29,9 +29,8 @@
 #    "ip/kr260_starter_kit_wrapper.v"
 #    "ip/NiFpgaAG_poc_ip.v"
 #    "ip/NiFpgaIPWrapper_poc_ip.vhd"
-#    "archive_project_summary.txt"
-#    "default.xdc"
-#    "Xentech.xdc"
+#    "../archive_project_summary.txt"
+#    "constraints.xdc"
 #
 #*****************************************************************************************
 
@@ -46,9 +45,8 @@ proc checkRequiredFiles { origin_dir} {
  "[file normalize "$origin_dir/ip/kr260_starter_kit_wrapper.v"]"\
  "[file normalize "$origin_dir/ip/NiFpgaAG_poc_ip.v"]"\
  "[file normalize "$origin_dir/ip/NiFpgaIPWrapper_poc_ip.vhd"]"\
- "[file normalize "$origin_dir/archive_project_summary.txt"]"\
- "[file normalize "$origin_dir/default.xdc"]"\
- "[file normalize "$origin_dir/Xentech.xdc"]"\
+ "[file normalize "$origin_dir/../archive_project_summary.txt"]"\
+ "[file normalize "$origin_dir/constraints.xdc"]"\
   ]
   foreach ifile $files {
     if { ![file isfile $ifile] } {
@@ -187,7 +185,7 @@ set files [list \
  [file normalize "${origin_dir}/ip/xgmii2axis.v" ]\
  [file normalize "${origin_dir}/ip/my_state.v" ]\
  [file normalize "${origin_dir}/ip/kr260_starter_kit_wrapper.v"]\
- [file normalize "${origin_dir}/archive_project_summary.txt" ]\
+ [file normalize "${origin_dir}/../archive_project_summary.txt" ]\
  [file normalize "${origin_dir}/ip/NiFpgaAG_poc_ip.v" ]\
  [file normalize "${origin_dir}/ip/NiFpgaIPWrapper_poc_ip.vhd" ]\
 ]
@@ -203,7 +201,7 @@ set_property -name "file_type" -value "VHDL" -objects $file_obj
 
 
 # Set 'sources_1' fileset file properties for local files
-set file "imports/xgmii_includes.vh"
+set file "xgmii_includes.vh"
 set file_obj [get_files -of_objects [get_filesets sources_1] [list "*$file"]]
 set_property -name "file_type" -value "Verilog Header" -objects $file_obj
 
@@ -223,16 +221,9 @@ if {[string equal [get_filesets -quiet constrs_1] ""]} {
 set obj [get_filesets constrs_1]
 
 # Add/Import constrs file and set constrs file properties
-set file "[file normalize ${origin_dir}/default.xdc]"
+set file "[file normalize ${origin_dir}/constraints.xdc]"
 set file_imported [import_files -fileset constrs_1 [list $file]]
-set file "default.xdc"
-set file_obj [get_files -of_objects [get_filesets constrs_1] [list "*$file"]]
-set_property -name "file_type" -value "XDC" -objects $file_obj
-
-# Add/Import constrs file and set constrs file properties
-set file "[file normalize ${origin_dir}/Xentech.xdc]"
-set file_imported [import_files -fileset constrs_1 [list $file]]
-set file "Xentech.xdc"
+set file "constraints.xdc"
 set file_obj [get_files -of_objects [get_filesets constrs_1] [list "*$file"]]
 set_property -name "file_type" -value "XDC" -objects $file_obj
 

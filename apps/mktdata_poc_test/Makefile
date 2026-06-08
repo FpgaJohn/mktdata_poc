@@ -23,7 +23,7 @@ REMOTE_PATH ?= /tmp/
 all: $(TARGET)
 
 $(TARGET): main.c
-	$(CC) $(CFLAGS) -o $@ $<
+	$(CC) $(CFLAGS) -pthread -o $@ $<
 	@file $@
 
 clean:
@@ -33,4 +33,4 @@ deploy: $(TARGET)
 	scp $(TARGET) $(REMOTE_HOST):$(REMOTE_PATH)
 
 run: deploy
-	ssh $(REMOTE_HOST) "sudo $(REMOTE_PATH)$(TARGET)"
+	ssh $(REMOTE_HOST) "sudo $(REMOTE_PATH)$(TARGET) test"

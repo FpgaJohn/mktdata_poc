@@ -17,42 +17,64 @@ MAKEFLAGS += --no-print-directory
         test-build test-deploy test-run test-clean \
         kria-build kria-deploy kria-clean \
         info deploy deploy-run \
-        jtag-reboot tty tty-stop \
+        jtag-reboot board-reset tty tty-list tty-stop list-all \
         list-resources list-gpio list-fifo list-dma-fifo
 
 help:
-	@echo "Targets:"
-	@echo "  xsa                 - Build Vivado project and export XSA with bitstream"
-	@echo "  xsa-clean           - Remove Vivado build artifacts"
+	@echo "mktdata_poc — KR260 market data proof-of-concept"
 	@echo ""
-	@echo "  bare-metal-build    - Build apps/mktdata_poc_bm (Vitis Classic, standalone)"
-	@echo "  bare-metal-run      - Program PL + run ELF on Cortex-A53 #0 via JTAG"
-	@echo "  bare-metal-clean    - Remove apps/mktdata_poc_bm workspace"
+	@echo "Vivado:"
+	@echo "  make xsa               Build Vivado project and export XSA with bitstream"
+	@echo "  make xsa-clean         Remove Vivado build artifacts"
 	@echo ""
-	@echo "  rtos-build          - Build apps/mktdata_poc_rtos (Vitis Classic, FreeRTOS BSP)"
-	@echo "  rtos-run            - Program PL + run FreeRTOS ELF on Cortex-A53 #0 via JTAG"
-	@echo "  rtos-clean          - Remove apps/mktdata_poc_rtos workspace"
+	@echo "Bare-metal (JTAG):"
+	@echo "  make bare-metal-build  Build apps/mktdata_poc_bm (Vitis Classic, standalone)"
+	@echo "  make bare-metal-run    Program PL + run ELF on Cortex-A53 #0 via JTAG"
+	@echo "  make bare-metal-clean  Remove apps/mktdata_poc_bm workspace"
 	@echo ""
-	@echo "  test-build          - Cross-compile apps/mktdata_poc_test (aarch64 Linux)"
-	@echo "  test-deploy         - scp the test binary to $(KR260_HOST):/tmp/"
-	@echo "  test-run            - Deploy and ssh-run the test binary as root"
-	@echo "  test-clean          - Remove apps/mktdata_poc_test binary"
+	@echo "FreeRTOS (JTAG):"
+	@echo "  make rtos-build        Build apps/mktdata_poc_rtos (Vitis Classic, FreeRTOS BSP)"
+	@echo "  make rtos-run          Program PL + run FreeRTOS ELF on Cortex-A53 #0 via JTAG"
+	@echo "  make rtos-clean        Remove apps/mktdata_poc_rtos workspace"
 	@echo ""
-	@echo "  kria-build          - Build kria_app/build/mktdata_poc/ package"
-	@echo "  kria-deploy         - scp the kria_app package to $(KR260_HOST):~/"
-	@echo "  kria-clean          - Remove kria_app/build/"
+	@echo "Linux userspace test (aarch64 cross-compile):"
+	@echo "  make test-build        Cross-compile apps/mktdata_poc_test (aarch64 Linux)"
+	@echo "  make test-deploy       scp the test binary to $(KR260_HOST):/tmp/"
+	@echo "  make test-run          Deploy and ssh-run the test binary as root"
+	@echo "  make test-clean        Remove apps/mktdata_poc_test binary"
 	@echo ""
-	@echo "  info                - scp + run scripts/list_uio.sh on the board"
-	@echo "  deploy              - scp scripts/* to $(KR260_HOST):~/"
-	@echo "  deploy-run          - Install kria app + run /tmp/mktdata_poc_test on the board"
-	@echo "  jtag-reboot         - Reset the KR260 via JTAG (resumes the SD/QSPI boot path)"
-	@echo "  tty                 - Open KR260 PS-UART in screen (115200 8N1)"
-	@echo "  tty-stop            - Kill any screen session attached to the KR260 UART"
+	@echo "Kria runtime app (dfx-mgr / xmutil):"
+	@echo "  make kria-build        Build kria_app/build/mktdata_poc/ package"
+	@echo "  make kria-deploy       scp the kria_app package to $(KR260_HOST):~/"
+	@echo "  make kria-clean        Remove kria_app/build/"
 	@echo ""
-	@echo "  list-resources      - Display all IP blocks in the design"
-	@echo "  list-gpio           - Display AXI GPIO IPs"
-	@echo "  list-fifo           - Display all FIFO IPs"
-	@echo "  list-dma-fifo       - Display AXI Stream data FIFOs"
+	@echo "Board (SSH to $(KR260_USER)@$(KR260_HOST)):"
+	@echo "  make info              scp + run scripts/list_uio.sh on the board"
+	@echo "  make deploy            scp scripts/* to $(KR260_HOST):~/"
+	@echo "  make deploy-run        Install kria app + run /tmp/mktdata_poc_test on the board"
+	@echo ""
+	@echo "Utilities:"
+	@echo "  make jtag-reboot       Reset the KR260 via JTAG (resumes the SD/QSPI boot path)"
+	@echo "  make board-reset       System-reset the KR260 PS+PL via JTAG (xsct rst -system)"
+	@echo "  make tty               Open KR260 PS-UART (115200 8N1; default: tio, Ctrl-t q to quit)"
+	@echo "  make tty-list          List screen sessions and processes holding any /dev/ttyUSB*"
+	@echo "  make tty-stop          Kill any screen session attached to the KR260 UART"
+	@echo "  make list-all          List all FPGA devices and which USB/tty port they are on"
+	@echo ""
+	@echo "Design introspection:"
+	@echo "  make list-resources    Display all IP blocks in the design"
+	@echo "  make list-gpio         Display AXI GPIO IPs"
+	@echo "  make list-fifo         Display all FIFO IPs"
+	@echo "  make list-dma-fifo     Display AXI Stream data FIFOs"
+	@echo ""
+	@echo "Help:"
+	@echo "  make help              Show this help"
+	@echo ""
+	@echo "Variables:"
+	@echo "  KR260_HOST=$(KR260_HOST)      Board hostname/IP for SSH deploy"
+	@echo "  KR260_USER=$(KR260_USER)      Board username"
+	@echo "  KR260_UART=$(KR260_UART)  PS-UART device (auto-detected)"
+	@echo "  TTY_TOOL=$(TTY_TOOL)           Serial terminal for 'make tty'"
 
 # -- Vivado --------------------------------------------------------------------
 
@@ -132,7 +154,7 @@ deploy-run:
 	    sudo xmutil loadapp mktdata_poc && \
 	    cat /sys/class/fpga_manager/fpga0/state && \
 	    echo 8 | sudo tee /proc/sys/vm/nr_hugepages > /dev/null && \
-	    sudo /tmp/mktdata_poc_test \
+	    sudo /tmp/mktdata_poc_test test \
 	'
 
 # Reboot KR260 via JTAG -- restores normal boot from DIP switches (SD/QSPI).
@@ -163,6 +185,32 @@ jtag-reboot:
 	    exit \
 	'
 
+# System-reset the KR260 via JTAG (PS + PL). Equivalent to pressing the reset
+# button. Unlike jtag-reboot, waits for the reset to settle and disconnects.
+board-reset:
+	@if [ ! -f "$(VITIS_SETTINGS)" ]; then \
+	    echo "error: Vitis Classic not found at $(VITIS_SETTINGS)" >&2; \
+	    exit 1; \
+	fi
+	@for dev in /sys/bus/usb/devices/*; do \
+	    if [ -f "$$dev/manufacturer" ] && [ "$$(cat $$dev/manufacturer 2>/dev/null)" = "Xilinx" ] && \
+	       [ "$$(cat $$dev/idProduct 2>/dev/null)" = "6011" ]; then \
+	        intf="$$(basename $$dev):1.0"; \
+	        if [ -e "/sys/bus/usb/drivers/ftdi_sio/$$intf" ]; then \
+	            echo "==> Unbinding $$intf from ftdi_sio (JTAG channel)"; \
+	            echo "$$intf" | sudo tee /sys/bus/usb/drivers/ftdi_sio/unbind > /dev/null; \
+	        fi; \
+	    fi; \
+	done
+	@echo "==> System-resetting KR260 PS+PL via JTAG"
+	@source $(VITIS_SETTINGS) && xsct -eval ' \
+	    connect; \
+	    targets -set -filter {name =~ "PSU" && jtag_cable_name =~ "Xilinx*"}; \
+	    rst -system; \
+	    after 1000; \
+	    disconnect'
+	@echo "==> Reset complete"
+
 # Auto-detect KR260 PS-UART (Xilinx FT4232H, interface 01).
 KR260_UART ?= $(or $(shell for dev in /sys/class/tty/ttyUSB*; do \
     mfg=$$(cat "$$dev/device/../../manufacturer" 2>/dev/null); \
@@ -174,9 +222,18 @@ done),/dev/ttyUSB1)
 
 SCREEN_SESSION ?= kr260-uart
 
+# Open KR260 PS-UART in tio (tmux-friendly; Ctrl-t q to quit).
+# Override TTY_TOOL=screen / picocom / minicom if preferred.
+TTY_TOOL ?= tio
 tty:
-	@echo "==> KR260 UART: $(KR260_UART) (115200 8N1, session=$(SCREEN_SESSION))"
-	screen -S $(SCREEN_SESSION) $(KR260_UART) 115200
+	@echo "==> KR260 UART: $(KR260_UART) (115200 8N1) via $(TTY_TOOL)"
+	@case "$(TTY_TOOL)" in \
+	    tio)     tio -b 115200 -d 8 -p none -s 1 -f none $(KR260_UART) ;; \
+	    screen)  screen -S $(SCREEN_SESSION) $(KR260_UART) 115200 ;; \
+	    picocom) picocom -b 115200 $(KR260_UART) ;; \
+	    minicom) minicom -D $(KR260_UART) -b 115200 ;; \
+	    *)       echo "unknown TTY_TOOL=$(TTY_TOOL)" >&2; exit 1 ;; \
+	esac
 
 # Kill any screen session whose name contains "kr260". Asks `screen -ls`
 # for the session list (immune to the recipe shell's own command line),
@@ -190,6 +247,65 @@ tty-stop:
 	else \
 	    echo "==> no kr260 screen session running"; \
 	fi
+
+# List screen sessions and any process holding a /dev/ttyUSB* device.
+tty-list:
+	@echo "==> screen sessions:"
+	@out=$$(screen -ls 2>/dev/null | awk '/[0-9]+\./ {print "  " $$0}'); \
+	if [ -n "$$out" ]; then echo "$$out"; else echo "  (none)"; fi
+	@echo "==> /dev/ttyUSB* holders:"
+	@found=0; \
+	for dev in /dev/ttyUSB*; do \
+	    [ -e "$$dev" ] || continue; \
+	    pids=$$(fuser "$$dev" 2>/dev/null); \
+	    if [ -n "$$pids" ]; then \
+	        for p in $$pids; do \
+	            cmd=$$(ps -p $$p -o comm= 2>/dev/null); \
+	            args=$$(ps -p $$p -o args= 2>/dev/null); \
+	            printf "  %-15s pid=%-7s %s   (%s)\n" "$$dev" "$$p" "$$cmd" "$$args"; \
+	        done; \
+	        found=1; \
+	    fi; \
+	done; \
+	if [ $$found -eq 0 ]; then echo "  (none)"; fi
+	@echo "==> KR260 PS-UART (auto-detected): $(KR260_UART)"
+
+# List all FPGA dev boards: USB serial ports per cable, then the JTAG scan
+# chain per cable as seen by xsct (a cable whose JTAG channel is blocked by
+# ftdi_sio may appear in the USB list but not the JTAG list).
+list-all:
+	@echo "==> USB serial ports:"
+	@found=0; \
+	for dev in /sys/class/tty/ttyUSB*; do \
+	    [ -e "$$dev" ] || continue; \
+	    mfg=$$(cat "$$dev/device/../../manufacturer" 2>/dev/null); \
+	    prod=$$(cat "$$dev/device/../../product" 2>/dev/null); \
+	    ser=$$(cat "$$dev/device/../../serial" 2>/dev/null); \
+	    intf=$$(cat "$$(readlink -f $$dev/device/..)/bInterfaceNumber" 2>/dev/null); \
+	    usbpath=$$(basename "$$(readlink -f $$dev/device/../..)"); \
+	    printf "  /dev/%-9s usb=%-10s if=%s  %s %s  serial=%s\n" \
+	        "$$(basename $$dev)" "$$usbpath" "$$intf" "$$mfg" "$$prod" "$$ser"; \
+	    found=1; \
+	done; \
+	if [ $$found -eq 0 ]; then echo "  (none)"; fi
+	@if [ ! -f "$(VITIS_SETTINGS)" ]; then \
+	    echo "==> JTAG: skipped (Vitis Classic not found at $(VITIS_SETTINGS))"; \
+	    exit 0; \
+	fi; \
+	echo "==> JTAG scan chains (xsct):"; \
+	source $(VITIS_SETTINGS) && xsct -eval ' \
+	    connect; \
+	    foreach t [jtag targets -target-properties] { \
+	        set level [dict get $$t level]; \
+	        set name  [dict get $$t name]; \
+	        if {$$level == 0} { \
+	            puts "  cable: $$name" \
+	        } else { \
+	            puts "    device: $$name" \
+	        } \
+	    }; \
+	    disconnect' 2>/dev/null | grep -E "cable:|device:" \
+	    || echo "  (no JTAG cables found)"
 
 # -- Design resource listing ---------------------------------------------------
 

@@ -1,11 +1,20 @@
 /*
  * mktdata_poc_test -- exercise the mktdata_poc bitstream from Linux userspace.
  *
- *   1. my_state accumulator via axi_gpio_control (ch1=ctrl, ch2=addend)
- *      and axi_gpio_value (ch1=sum, ch2=carry).
- *   2. axi_fifo_echo: AXI-S FIFO with TXD->RXD looped in PL.
- *   3. axi_dma_echo + axi_dma_fifo_echo: DDR -> MM2S -> FIFO -> S2MM -> DDR,
- *      software bridges FIFO RX -> TX (RDFD -> TDFD + TLR).
+ * Commands:
+ *   test    - the original three tests:
+ *               1. my_state accumulator via axi_gpio_control (ch1=ctrl,
+ *                  ch2=addend) and axi_gpio_value (ch1=sum, ch2=carry).
+ *               2. axi_fifo_echo: AXI-S FIFO with TXD->RXD looped in PL.
+ *               3. axi_dma_echo + axi_dma_fifo_echo: DDR -> MM2S -> FIFO ->
+ *                  S2MM -> DDR, software bridges FIFO RX -> TX.
+ *   reset   - pulse the NI IP reset (axi_gpio_1: 0 -> 1 -> 0) and exit.
+ *   debug   - continuously poll axi_fifo_debug, hex-dump frames (Ctrl-C stops).
+ *   mdebug  - same for axi_fifo_mdebug.
+ *   cmd     - same for axi_fifo_cmd.
+ *   poll    - poll FIFOs concurrently, one thread per FIFO. With no extra
+ *             args, all three; otherwise the named subset, e.g.
+ *             "poll debug mdebug".
  *
  * Runs as root (needs /dev/uioN, /proc/self/pagemap, mlock or hugepages).
  */
@@ -15,6 +24,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <pthread.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,12 +39,25 @@
 /* ---- Address map (matches vivado/mktdata_poc.tcl, HPM0_FPD aperture) ---- */
 #define ADDR_GPIO_CONTROL       0xA0040000UL
 #define ADDR_GPIO_VALUE         0xA00C0000UL
+#define ADDR_FIFO_MDEBUG_CTRL   0xA0050000UL
+#define ADDR_FIFO_MDEBUG_DATA   0xA0060000UL
+#define ADDR_FIFO_DEBUG_CTRL    0xA0070000UL
+#define ADDR_FIFO_DEBUG_DATA    0xA0080000UL
+#define ADDR_GPIO_1             0xA0090000UL
+#define ADDR_FIFO_CMD_CTRL      0xA00A0000UL
+#define ADDR_FIFO_CMD_DATA      0xA00B0000UL
 #define ADDR_FIFO_ECHO_CTRL     0xA0100000UL
 #define ADDR_FIFO_ECHO_DATA     0xA0110000UL
 #define ADDR_DMA_ECHO           0xA00D0000UL
 #define ADDR_DMA_FIFO_ECHO_CTRL 0xA00E0000UL
 #define ADDR_DMA_FIFO_ECHO_DATA 0xA00F0000UL
 #define MAP_SIZE                0x10000UL
+
+/* ---- AXI GPIO v2.0 ---- */
+#define GPIO_DATA   0x00    /* channel 1 data register */
+
+/* Idle backoff for the FIFO pollers (us). */
+#define POLL_IDLE_US 200
 
 /* ---- AXI4-Stream FIFO (PG080) ---- */
 #define FIFO_ISR    0x00
@@ -452,9 +476,9 @@ static int test_dma_fifo(volatile uint32_t *dma,
     return fails;
 }
 
-/* ---- main ---- */
+/* ---- Command: test (the original three tests) ---- */
 
-int main(void)
+static int cmd_test(void)
 {
     printf("Opening UIOs:\n");
     int fd_c, fd_v, fd_fc, fd_fd, fd_d, fd_dfc, fd_dfd;
@@ -476,4 +500,290 @@ int main(void)
     printf("Accumulator + FIFO + DMA-FIFO: %s\n", fails == 0 ? "PASS" : "FAIL");
     printf("=========================================\n");
     return fails == 0 ? 0 : 1;
+}
+
+/* ---- Command: reset (pulse the NI IP reset via axi_gpio_1) ---- */
+
+static int cmd_reset(void)
+{
+    printf("Opening UIOs:\n");
+    int fd_g1;
+    volatile uint32_t *gpio1 = map_uio(ADDR_GPIO_1, "axi_gpio_1", &fd_g1);
+    if (!gpio1) {
+        fprintf(stderr, "axi_gpio_1 not found -- was the kria app rebuilt and "
+                        "reloaded with the new device-tree overlay?\n");
+        return 1;
+    }
+
+    printf("Pulsing NI IP reset (axi_gpio_1 -> ctrlind_17_ip_reset): 0");
+    w32(gpio1, GPIO_DATA, 0);
+    usleep(1000);
+    printf(" -> 1");
+    w32(gpio1, GPIO_DATA, 1);
+    usleep(1000);
+    printf(" -> 0\n");
+    w32(gpio1, GPIO_DATA, 0);
+    usleep(1000);
+    printf("NI IP reset done.\n");
+    return 0;
+}
+
+/* ---- Commands: debug / mdebug / cmd / poll (RX-only FIFO pollers) ---- */
+
+static volatile sig_atomic_t g_stop = 0;
+
+static void on_sigint(int sig)
+{
+    (void)sig;
+    g_stop = 1;
+}
+
+static void install_sigint(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_sigint;
+    sigaction(SIGINT, &sa, NULL);
+}
+
+static pthread_mutex_t g_print_lock = PTHREAD_MUTEX_INITIALIZER;
+
+struct poller {
+    const char         *tag;    /* "DEBUG" / "MDEBUG" / "CMD" */
+    volatile uint32_t  *ctrl;   /* PG080 control (S_AXI) base */
+    volatile uint32_t  *data;   /* PG080 data (S_AXI_FULL) base */
+};
+
+/* Format one frame as a hex dump and emit it atomically. Bytes are printed
+ * in wire order: on a little-endian AXI4 read of the 64-bit RDFD, the first
+ * byte on the stream is the LSB of the word. */
+static void print_frame(const char *tag, unsigned frame, const uint64_t *words,
+                        uint32_t len, int partial)
+{
+    /* header + one 24-char line per 8 bytes; frames are small (KB at most) */
+    char buf[64 + ((len + 7) / 8) * 32];
+    size_t pos = 0;
+
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "[%s] frame %u (%u bytes)%s:\n",
+                    tag, frame, len, partial ? " (partial)" : "");
+    for (uint32_t off = 0; off < len; off += 8) {
+        uint32_t n = (len - off < 8) ? (len - off) : 8;
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "  %04x: ", off);
+        for (uint32_t i = 0; i < n; i++)
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "%02x",
+                            (unsigned)((words[off / 8] >> (8 * i)) & 0xff));
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "\n");
+    }
+
+    pthread_mutex_lock(&g_print_lock);
+    fputs(buf, stdout);
+    fflush(stdout);
+    pthread_mutex_unlock(&g_print_lock);
+}
+
+/* Poll one RX-only PG080 FIFO until g_stop. Also usable as a pthread entry. */
+static void *fifo_poller(void *arg)
+{
+    struct poller *p = (struct poller *)arg;
+    volatile uint32_t *ctrl = p->ctrl;
+    volatile uint64_t *d64  = (volatile uint64_t *)p->data;
+
+    /* RX-only core reset: SRR + RDFR, then clear sticky ISR. No TX regs. */
+    w32(ctrl, FIFO_SRR, FIFO_RESET_MAGIC);
+    usleep(1000);
+    w32(ctrl, FIFO_RDFR, FIFO_RESET_MAGIC);
+    usleep(1000);
+    w32(ctrl, FIFO_ISR, 0xFFFFFFFFu);
+
+    pthread_mutex_lock(&g_print_lock);
+    printf("[%s] polling (post-reset RDFO=%u)\n", p->tag, r32(ctrl, FIFO_RDFO));
+    fflush(stdout);
+    pthread_mutex_unlock(&g_print_lock);
+
+    unsigned frame = 0;
+    int warned_no_tlast = 0;
+
+    while (!g_stop) {
+        if (r32(ctrl, FIFO_RDFO) == 0) {
+            usleep(POLL_IDLE_US);
+            continue;
+        }
+
+        /* RLR is valid only once a complete (TLAST-terminated) frame is in
+         * the FIFO; reading it pops the next frame's byte length. */
+        uint32_t rlr = r32(ctrl, FIFO_RLR);
+        if (rlr == 0) {
+            if (!warned_no_tlast) {
+                fprintf(stderr, "[%s] words present but no complete frame "
+                                "(stream without TLAST?)\n", p->tag);
+                warned_no_tlast = 1;
+            }
+            usleep(POLL_IDLE_US);
+            continue;
+        }
+        warned_no_tlast = 0;
+
+        uint32_t len     = rlr & 0x7FFFFFFFu;
+        int      partial = (rlr >> 31) & 1;
+        uint32_t nwords  = (len + 7) / 8;
+
+        /* Sanity: a frame can't exceed the RX FIFO (512 x 64-bit words).
+         * An implausible RLR means we've lost sync -- reset and resync. */
+        if (len == 0 || len > 4096) {
+            fprintf(stderr, "[%s] implausible RLR=0x%08x -- resetting RX FIFO\n",
+                    p->tag, rlr);
+            w32(ctrl, FIFO_RDFR, FIFO_RESET_MAGIC);
+            usleep(1000);
+            w32(ctrl, FIFO_ISR, 0xFFFFFFFFu);
+            continue;
+        }
+
+        uint64_t words[nwords];
+        for (uint32_t i = 0; i < nwords; i++) {
+            asm volatile("dsb sy" ::: "memory");
+            words[i] = d64[FIFO_AXI4_RDFD / 8];
+        }
+
+        frame++;
+        print_frame(p->tag, frame, words, len, partial);
+    }
+    return NULL;
+}
+
+/* Map a poller's ctrl+data UIOs; returns 0 on success. */
+static int map_poller(struct poller *p, const char *tag,
+                      unsigned long ctrl_addr, unsigned long data_addr)
+{
+    char label[32];
+    int fd_c, fd_d;
+    p->tag = tag;
+    snprintf(label, sizeof(label), "axi_fifo_%s (ctrl)", tag);
+    p->ctrl = map_uio(ctrl_addr, label, &fd_c);
+    snprintf(label, sizeof(label), "axi_fifo_%s (data)", tag);
+    p->data = map_uio(data_addr, label, &fd_d);
+    if (!p->ctrl || !p->data) {
+        fprintf(stderr, "axi_fifo_%s not found -- was the kria app rebuilt and "
+                        "reloaded with the new device-tree overlay?\n", tag);
+        return -1;
+    }
+    return 0;
+}
+
+static int cmd_poll_one(const char *tag, unsigned long ctrl_addr,
+                        unsigned long data_addr)
+{
+    printf("Opening UIOs:\n");
+    struct poller p;
+    if (map_poller(&p, tag, ctrl_addr, data_addr) < 0) return 1;
+
+    install_sigint();
+    printf("Polling %s. Press Ctrl-C to stop.\n", tag);
+    fifo_poller(&p);
+    printf("\nStopped.\n");
+    return 0;
+}
+
+/* The pollable FIFOs, by command-line name. */
+static const struct {
+    const char    *name;   /* lower-case, as typed on the command line */
+    const char    *tag;    /* upper-case, as printed in frame dumps */
+    unsigned long  ctrl;
+    unsigned long  data;
+} g_fifos[] = {
+    { "debug",  "DEBUG",  ADDR_FIFO_DEBUG_CTRL,  ADDR_FIFO_DEBUG_DATA  },
+    { "mdebug", "MDEBUG", ADDR_FIFO_MDEBUG_CTRL, ADDR_FIFO_MDEBUG_DATA },
+    { "cmd",    "CMD",    ADDR_FIFO_CMD_CTRL,    ADDR_FIFO_CMD_DATA    },
+};
+#define N_FIFOS ((int)(sizeof(g_fifos) / sizeof(g_fifos[0])))
+
+/* poll [debug] [mdebug] [cmd] -- no names means all of them. */
+static int cmd_poll(int nsel, char **sel)
+{
+    int pick[N_FIFOS] = { 0 };
+
+    if (nsel == 0) {
+        for (int i = 0; i < N_FIFOS; i++) pick[i] = 1;
+    } else {
+        for (int s = 0; s < nsel; s++) {
+            int i;
+            for (i = 0; i < N_FIFOS; i++)
+                if (strcmp(sel[s], g_fifos[i].name) == 0) { pick[i] = 1; break; }
+            if (i == N_FIFOS) {
+                fprintf(stderr, "unknown FIFO '%s' (expected debug, mdebug or cmd)\n",
+                        sel[s]);
+                return 2;
+            }
+        }
+    }
+
+    printf("Opening UIOs:\n");
+    struct poller p[N_FIFOS];
+    int n = 0;
+    for (int i = 0; i < N_FIFOS; i++) {
+        if (!pick[i]) continue;
+        if (map_poller(&p[n], g_fifos[i].tag, g_fifos[i].ctrl, g_fifos[i].data) < 0)
+            return 1;
+        n++;
+    }
+
+    install_sigint();
+    printf("Polling");
+    for (int i = 0; i < n; i++) printf("%s%s", i ? "+" : " ", p[i].tag);
+    printf(". Press Ctrl-C to stop.\n");
+
+    if (n == 1) {           /* no point spawning a thread for one FIFO */
+        fifo_poller(&p[0]);
+        printf("\nStopped.\n");
+        return 0;
+    }
+
+    pthread_t tid[N_FIFOS];
+    for (int i = 0; i < n; i++) {
+        int rc = pthread_create(&tid[i], NULL, fifo_poller, &p[i]);
+        if (rc != 0) {
+            fprintf(stderr, "pthread_create(%s): %s\n", p[i].tag, strerror(rc));
+            g_stop = 1;
+            for (int j = 0; j < i; j++) pthread_join(tid[j], NULL);
+            return 1;
+        }
+    }
+    for (int i = 0; i < n; i++) pthread_join(tid[i], NULL);
+    printf("\nStopped.\n");
+    return 0;
+}
+
+/* ---- main ---- */
+
+static void usage(const char *argv0)
+{
+    fprintf(stderr,
+        "Usage: %s <command>\n"
+        "  test     run the accumulator / FIFO-echo / DMA-echo tests\n"
+        "  reset    pulse the NI IP reset (axi_gpio_1: 0 -> 1 -> 0) and exit\n"
+        "  debug    continuously poll axi_fifo_debug and hex-dump frames\n"
+        "  mdebug   continuously poll axi_fifo_mdebug and hex-dump frames\n"
+        "  cmd      continuously poll axi_fifo_cmd and hex-dump frames\n"
+        "  poll [debug] [mdebug] [cmd]\n"
+        "           poll the named FIFOs (default: all three), one thread per FIFO\n",
+        argv0);
+}
+
+int main(int argc, char **argv)
+{
+    if (argc < 2) { usage(argv[0]); return 2; }
+
+    if (strcmp(argv[1], "poll") == 0)   return cmd_poll(argc - 2, argv + 2);
+    if (argc != 2) { usage(argv[0]); return 2; }
+
+    if (strcmp(argv[1], "test") == 0)   return cmd_test();
+    if (strcmp(argv[1], "reset") == 0)  return cmd_reset();
+    if (strcmp(argv[1], "debug") == 0)
+        return cmd_poll_one("DEBUG",  ADDR_FIFO_DEBUG_CTRL,  ADDR_FIFO_DEBUG_DATA);
+    if (strcmp(argv[1], "mdebug") == 0)
+        return cmd_poll_one("MDEBUG", ADDR_FIFO_MDEBUG_CTRL, ADDR_FIFO_MDEBUG_DATA);
+    if (strcmp(argv[1], "cmd") == 0)
+        return cmd_poll_one("CMD",    ADDR_FIFO_CMD_CTRL,    ADDR_FIFO_CMD_DATA);
+
+    usage(argv[0]);
+    return 2;
 }

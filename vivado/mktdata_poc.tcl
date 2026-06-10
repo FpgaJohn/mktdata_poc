@@ -42,6 +42,7 @@ proc checkRequiredFiles { origin_dir} {
  "[file normalize "$origin_dir/ip/axis2xgmii.v"]"\
  "[file normalize "$origin_dir/ip/xgmii2axis.v"]"\
  "[file normalize "$origin_dir/ip/my_state.v"]"\
+ "[file normalize "$origin_dir/ip/simple_fifo.v"]"\
  "[file normalize "$origin_dir/ip/kr260_starter_kit_wrapper.v"]"\
  "[file normalize "$origin_dir/ip/NiFpgaAG_poc_ip.v"]"\
  "[file normalize "$origin_dir/ip/NiFpgaIPWrapper_poc_ip.vhd"]"\
@@ -184,6 +185,7 @@ set files [list \
  [file normalize "${origin_dir}/ip/axis2xgmii.v" ]\
  [file normalize "${origin_dir}/ip/xgmii2axis.v" ]\
  [file normalize "${origin_dir}/ip/my_state.v" ]\
+ [file normalize "${origin_dir}/ip/simple_fifo.v" ]\
  [file normalize "${origin_dir}/ip/kr260_starter_kit_wrapper.v"]\
  [file normalize "${origin_dir}/../archive_project_summary.txt" ]\
  [file normalize "${origin_dir}/ip/NiFpgaAG_poc_ip.v" ]\
@@ -862,7 +864,7 @@ MIO#GPIO0 MIO#GPIO0 MIO#GPIO0 MIO#GPIO0 MIO#GPIO0 MIO#GPIO0 MIO#GPIO0 MIO#GPIO0 
     CONFIG.PSU__ACPU3__POWER__ON {1} \
     CONFIG.PSU__ACTUAL__IP {1} \
     CONFIG.PSU__ACT_DDR_FREQ_MHZ {1066.656006} \
-    CONFIG.PSU__AFI0_COHERENCY {0} \
+    CONFIG.PSU__AFI0_COHERENCY {1} \
     CONFIG.PSU__AUX_REF_CLK__FREQMHZ {33.333} \
     CONFIG.PSU__CAN0_LOOP_CAN1__ENABLE {0} \
     CONFIG.PSU__CAN0__PERIPHERAL__ENABLE {0} \
@@ -1541,9 +1543,9 @@ Port;FD4A0000;FD4AFFFF;1|FPD;DPDMA;FD4C0000;FD4CFFFF;1|FPD;DDR_XMPU5_CFG;FD05000
     CONFIG.PSU__USE__IRQ {0} \
     CONFIG.PSU__USE__IRQ0 {1} \
     CONFIG.PSU__USE__IRQ1 {1} \
-    CONFIG.PSU__USE__M_AXI_GP0 {1} \
+    CONFIG.PSU__USE__M_AXI_GP0 {0} \
     CONFIG.PSU__USE__M_AXI_GP1 {0} \
-    CONFIG.PSU__USE__M_AXI_GP2 {0} \
+    CONFIG.PSU__USE__M_AXI_GP2 {1} \
     CONFIG.PSU__USE__PROC_EVENT_BUS {0} \
     CONFIG.PSU__USE__RPU_LEGACY_INTERRUPT {0} \
     CONFIG.PSU__USE__RST0 {0} \
@@ -1727,6 +1729,7 @@ Port;FD4A0000;FD4AFFFF;1|FPD;DPDMA;FD4C0000;FD4CFFFF;1|FPD;DDR_XMPU5_CFG;FD05000
     CONFIG.c_s_axis_s2mm_tdata_width {64} \
     CONFIG.c_sg_include_stscntrl_strm {0} \
     CONFIG.c_sg_length_width {16} \
+    CONFIG.c_addr_width {49} \
   ] $axi_dma_echo
 
 
@@ -1794,7 +1797,7 @@ Port;FD4A0000;FD4AFFFF;1|FPD;DPDMA;FD4C0000;FD4CFFFF;1|FPD;DDR_XMPU5_CFG;FD05000
   connect_bd_intf_net -intf_net slave_axi_mux_M17_AXI [get_bd_intf_pins slave_axi_mux/M17_AXI] [get_bd_intf_pins axi_fifo_echo/S_AXI_FULL]
   connect_bd_intf_net -intf_net tx_data_fifo_M_AXIS [get_bd_intf_pins axis2xgmii_0/interface_axis] [get_bd_intf_pins tx_data_fifo/M_AXIS]
   connect_bd_intf_net -intf_net xxv_ethernet_0_gt_tx [get_bd_intf_ports gt_tx_0] [get_bd_intf_pins xxv_ethernet_0/gt_tx]
-  connect_bd_intf_net -intf_net zynq_ultra_ps_e_0_M_AXI_HPM0_FPD [get_bd_intf_pins slave_axi_mux/S00_AXI] [get_bd_intf_pins zynq_ultra_ps_e_0/M_AXI_HPM0_FPD]
+  connect_bd_intf_net -intf_net zynq_ultra_ps_e_0_M_AXI_HPM0_LPD [get_bd_intf_pins slave_axi_mux/S00_AXI] [get_bd_intf_pins zynq_ultra_ps_e_0/M_AXI_HPM0_LPD]
 
   # Create port connections
   connect_bd_net -net NiFpgaIPWrapper_poc_0_ctrlind_00_DEBUG_TVALID [get_bd_pins NiFpgaIPWrapper_poc_0/ctrlind_00_MDEBUG_TVALID] [get_bd_pins axi_fifo_mdebug/axi_str_rxd_tvalid]
@@ -1856,7 +1859,7 @@ Port;FD4A0000;FD4AFFFF;1|FPD;DPDMA;FD4C0000;FD4CFFFF;1|FPD;DDR_XMPU5_CFG;FD05000
   connect_bd_net -net xxv_ethernet_0_user_rx_reset_0 [get_bd_pins xxv_ethernet_0/user_rx_reset_0] [get_bd_pins rx_rst_n/Op1] [get_bd_pins NiFpgaIPWrapper_poc_0/reset]
   connect_bd_net -net xxv_ethernet_0_user_tx_reset_0 [get_bd_pins xxv_ethernet_0/user_tx_reset_0] [get_bd_pins tx_rst_n/Op1]
   connect_bd_net -net zynq_ultra_ps_e_0_emio_ttc0_wave_o [get_bd_pins zynq_ultra_ps_e_0/emio_ttc0_wave_o] [get_bd_pins xlslice_0/Din]
-  connect_bd_net -net zynq_ultra_ps_e_0_pl_clk0 [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] [get_bd_pins axi_dma_0/s_axi_lite_aclk] [get_bd_pins axi_dma_0/m_axi_sg_aclk] [get_bd_pins axi_gpio_0/s_axi_aclk] [get_bd_pins axi_iic_0/s_axi_aclk] [get_bd_pins axi_interconnect_0/ACLK] [get_bd_pins axi_interconnect_0/S00_ACLK] [get_bd_pins axi_interconnect_0/M00_ACLK] [get_bd_pins proc_sys_reset_0/slowest_sync_clk] [get_bd_pins slave_axi_mux/ACLK] [get_bd_pins slave_axi_mux/S00_ACLK] [get_bd_pins slave_axi_mux/M00_ACLK] [get_bd_pins slave_axi_mux/M01_ACLK] [get_bd_pins slave_axi_mux/M02_ACLK] [get_bd_pins slave_axi_mux/M03_ACLK] [get_bd_pins xxv_ethernet_0/dclk] [get_bd_pins xxv_ethernet_0/s_axi_aclk_0] [get_bd_pins zynq_ultra_ps_e_0/maxihpm0_fpd_aclk] [get_bd_pins zynq_ultra_ps_e_0/saxihpc0_fpd_aclk] [get_bd_pins slave_axi_mux/M04_ACLK] [get_bd_pins axi_fifo_mdebug/s_axi_aclk] [get_bd_pins slave_axi_mux/M05_ACLK] [get_bd_pins slave_axi_mux/M06_ACLK] [get_bd_pins axi_fifo_debug/s_axi_aclk] [get_bd_pins slave_axi_mux/M07_ACLK] [get_bd_pins slave_axi_mux/M08_ACLK] [get_bd_pins axi_gpio_1/s_axi_aclk] [get_bd_pins slave_axi_mux/M09_ACLK] [get_bd_pins axi_fifo_cmd/s_axi_aclk] [get_bd_pins slave_axi_mux/M10_ACLK] [get_bd_pins slave_axi_mux/M11_ACLK] [get_bd_pins NiFpgaIPWrapper_poc_0/Clk40MhzDerived5x2B00MHz] [get_bd_pins axi_gpio_control/s_axi_aclk] [get_bd_pins axi_gpio_value/s_axi_aclk] [get_bd_pins slave_axi_mux/M12_ACLK] [get_bd_pins my_state_0/clock] [get_bd_pins axi_dma_echo/s_axi_lite_aclk] [get_bd_pins axi_dma_echo/m_axi_sg_aclk] [get_bd_pins axi_dma_echo/m_axi_mm2s_aclk] [get_bd_pins axi_dma_echo/m_axi_s2mm_aclk] [get_bd_pins axi_interconnect_0/S03_ACLK] [get_bd_pins axi_interconnect_0/S04_ACLK] [get_bd_pins axi_interconnect_0/S05_ACLK] [get_bd_pins slave_axi_mux/M13_ACLK] [get_bd_pins axi_dma_fifo_echo/s_axi_aclk] [get_bd_pins slave_axi_mux/M14_ACLK] [get_bd_pins slave_axi_mux/M15_ACLK] [get_bd_pins axi_fifo_echo/s_axi_aclk] [get_bd_pins slave_axi_mux/M16_ACLK] [get_bd_pins slave_axi_mux/M17_ACLK]
+  connect_bd_net -net zynq_ultra_ps_e_0_pl_clk0 [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] [get_bd_pins axi_dma_0/s_axi_lite_aclk] [get_bd_pins axi_dma_0/m_axi_sg_aclk] [get_bd_pins axi_gpio_0/s_axi_aclk] [get_bd_pins axi_iic_0/s_axi_aclk] [get_bd_pins axi_interconnect_0/ACLK] [get_bd_pins axi_interconnect_0/S00_ACLK] [get_bd_pins axi_interconnect_0/M00_ACLK] [get_bd_pins proc_sys_reset_0/slowest_sync_clk] [get_bd_pins slave_axi_mux/ACLK] [get_bd_pins slave_axi_mux/S00_ACLK] [get_bd_pins slave_axi_mux/M00_ACLK] [get_bd_pins slave_axi_mux/M01_ACLK] [get_bd_pins slave_axi_mux/M02_ACLK] [get_bd_pins slave_axi_mux/M03_ACLK] [get_bd_pins xxv_ethernet_0/dclk] [get_bd_pins xxv_ethernet_0/s_axi_aclk_0] [get_bd_pins zynq_ultra_ps_e_0/maxihpm0_lpd_aclk] [get_bd_pins zynq_ultra_ps_e_0/saxihpc0_fpd_aclk] [get_bd_pins slave_axi_mux/M04_ACLK] [get_bd_pins axi_fifo_mdebug/s_axi_aclk] [get_bd_pins slave_axi_mux/M05_ACLK] [get_bd_pins slave_axi_mux/M06_ACLK] [get_bd_pins axi_fifo_debug/s_axi_aclk] [get_bd_pins slave_axi_mux/M07_ACLK] [get_bd_pins slave_axi_mux/M08_ACLK] [get_bd_pins axi_gpio_1/s_axi_aclk] [get_bd_pins slave_axi_mux/M09_ACLK] [get_bd_pins axi_fifo_cmd/s_axi_aclk] [get_bd_pins slave_axi_mux/M10_ACLK] [get_bd_pins slave_axi_mux/M11_ACLK] [get_bd_pins NiFpgaIPWrapper_poc_0/Clk40MhzDerived5x2B00MHz] [get_bd_pins axi_gpio_control/s_axi_aclk] [get_bd_pins axi_gpio_value/s_axi_aclk] [get_bd_pins slave_axi_mux/M12_ACLK] [get_bd_pins my_state_0/clock] [get_bd_pins axi_dma_echo/s_axi_lite_aclk] [get_bd_pins axi_dma_echo/m_axi_sg_aclk] [get_bd_pins axi_dma_echo/m_axi_mm2s_aclk] [get_bd_pins axi_dma_echo/m_axi_s2mm_aclk] [get_bd_pins axi_interconnect_0/S03_ACLK] [get_bd_pins axi_interconnect_0/S04_ACLK] [get_bd_pins axi_interconnect_0/S05_ACLK] [get_bd_pins slave_axi_mux/M13_ACLK] [get_bd_pins axi_dma_fifo_echo/s_axi_aclk] [get_bd_pins slave_axi_mux/M14_ACLK] [get_bd_pins slave_axi_mux/M15_ACLK] [get_bd_pins axi_fifo_echo/s_axi_aclk] [get_bd_pins slave_axi_mux/M16_ACLK] [get_bd_pins slave_axi_mux/M17_ACLK]
   connect_bd_net -net zynq_ultra_ps_e_0_pl_resetn0 [get_bd_pins zynq_ultra_ps_e_0/pl_resetn0] [get_bd_pins PlReset/Op1] [get_bd_pins proc_sys_reset_0/ext_reset_in]
 
   # Create address segments
@@ -1866,24 +1869,24 @@ Port;FD4A0000;FD4AFFFF;1|FPD;DPDMA;FD4C0000;FD4CFFFF;1|FPD;DDR_XMPU5_CFG;FD05000
   assign_bd_address -offset 0xC0000000 -range 0x20000000 -target_address_space [get_bd_addr_spaces axi_dma_0/Data_S2MM] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP0/HPC0_QSPI] -force
   assign_bd_address -offset 0x00000000 -range 0x80000000 -target_address_space [get_bd_addr_spaces axi_dma_0/Data_SG] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP0/HPC0_DDR_LOW] -force
   assign_bd_address -offset 0xC0000000 -range 0x20000000 -target_address_space [get_bd_addr_spaces axi_dma_0/Data_SG] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP0/HPC0_QSPI] -force
-  assign_bd_address -offset 0xA0020000 -range 0x00010000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_dma_0/S_AXI_LITE/Reg] -force
-  assign_bd_address -offset 0xA00D0000 -range 0x00010000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_dma_echo/S_AXI_LITE/Reg] -force
-  assign_bd_address -offset 0xA00E0000 -range 0x00010000 -with_name SEG_axi_fifo_echo_Mem0 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_dma_fifo_echo/S_AXI/Mem0] -force
-  assign_bd_address -offset 0xA0100000 -range 0x00010000 -with_name SEG_axi_fifo_echo_Mem0_1 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_fifo_echo/S_AXI/Mem0] -force
-  assign_bd_address -offset 0xA00F0000 -range 0x00010000 -with_name SEG_axi_fifo_echo_Mem1 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_dma_fifo_echo/S_AXI_FULL/Mem1] -force
-  assign_bd_address -offset 0xA0110000 -range 0x00010000 -with_name SEG_axi_fifo_echo_Mem1_1 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_fifo_echo/S_AXI_FULL/Mem1] -force
-  assign_bd_address -offset 0xA0050000 -range 0x00010000 -with_name SEG_axi_fifo_mm_s_0_Mem0 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_fifo_mdebug/S_AXI/Mem0] -force
-  assign_bd_address -offset 0xA0060000 -range 0x00010000 -with_name SEG_axi_fifo_mm_s_0_Mem1 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_fifo_mdebug/S_AXI_FULL/Mem1] -force
-  assign_bd_address -offset 0xA0070000 -range 0x00010000 -with_name SEG_axi_fifo_mm_s_1_Mem0 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_fifo_debug/S_AXI/Mem0] -force
-  assign_bd_address -offset 0xA0080000 -range 0x00010000 -with_name SEG_axi_fifo_mm_s_1_Mem1 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_fifo_debug/S_AXI_FULL/Mem1] -force
-  assign_bd_address -offset 0xA00A0000 -range 0x00010000 -with_name SEG_axi_fifo_mm_s_2_Mem0 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_fifo_cmd/S_AXI/Mem0] -force
-  assign_bd_address -offset 0xA00B0000 -range 0x00010000 -with_name SEG_axi_fifo_mm_s_2_Mem1 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_fifo_cmd/S_AXI_FULL/Mem1] -force
-  assign_bd_address -offset 0xA0000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_gpio_0/S_AXI/Reg] -force
-  assign_bd_address -offset 0xA0090000 -range 0x00010000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_gpio_1/S_AXI/Reg] -force
-  assign_bd_address -offset 0xA0040000 -range 0x00010000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_gpio_control/S_AXI/Reg] -force
-  assign_bd_address -offset 0xA00C0000 -range 0x00010000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_gpio_value/S_AXI/Reg] -force
-  assign_bd_address -offset 0xA0010000 -range 0x00010000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_iic_0/S_AXI/Reg] -force
-  assign_bd_address -offset 0xA0030000 -range 0x00010000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs xxv_ethernet_0/s_axi_0/Reg] -force
+  assign_bd_address -offset 0x80020000 -range 0x00010000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_dma_0/S_AXI_LITE/Reg] -force
+  assign_bd_address -offset 0x800D0000 -range 0x00010000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_dma_echo/S_AXI_LITE/Reg] -force
+  assign_bd_address -offset 0x800E0000 -range 0x00010000 -with_name SEG_axi_fifo_echo_Mem0 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_dma_fifo_echo/S_AXI/Mem0] -force
+  assign_bd_address -offset 0x80100000 -range 0x00010000 -with_name SEG_axi_fifo_echo_Mem0_1 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_fifo_echo/S_AXI/Mem0] -force
+  assign_bd_address -offset 0x800F0000 -range 0x00010000 -with_name SEG_axi_fifo_echo_Mem1 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_dma_fifo_echo/S_AXI_FULL/Mem1] -force
+  assign_bd_address -offset 0x80110000 -range 0x00010000 -with_name SEG_axi_fifo_echo_Mem1_1 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_fifo_echo/S_AXI_FULL/Mem1] -force
+  assign_bd_address -offset 0x80050000 -range 0x00010000 -with_name SEG_axi_fifo_mm_s_0_Mem0 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_fifo_mdebug/S_AXI/Mem0] -force
+  assign_bd_address -offset 0x80060000 -range 0x00010000 -with_name SEG_axi_fifo_mm_s_0_Mem1 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_fifo_mdebug/S_AXI_FULL/Mem1] -force
+  assign_bd_address -offset 0x80070000 -range 0x00010000 -with_name SEG_axi_fifo_mm_s_1_Mem0 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_fifo_debug/S_AXI/Mem0] -force
+  assign_bd_address -offset 0x80080000 -range 0x00010000 -with_name SEG_axi_fifo_mm_s_1_Mem1 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_fifo_debug/S_AXI_FULL/Mem1] -force
+  assign_bd_address -offset 0x800A0000 -range 0x00010000 -with_name SEG_axi_fifo_mm_s_2_Mem0 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_fifo_cmd/S_AXI/Mem0] -force
+  assign_bd_address -offset 0x800B0000 -range 0x00010000 -with_name SEG_axi_fifo_mm_s_2_Mem1 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_fifo_cmd/S_AXI_FULL/Mem1] -force
+  assign_bd_address -offset 0x80000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_gpio_0/S_AXI/Reg] -force
+  assign_bd_address -offset 0x80090000 -range 0x00010000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_gpio_1/S_AXI/Reg] -force
+  assign_bd_address -offset 0x80040000 -range 0x00010000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_gpio_control/S_AXI/Reg] -force
+  assign_bd_address -offset 0x800C0000 -range 0x00010000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_gpio_value/S_AXI/Reg] -force
+  assign_bd_address -offset 0x80010000 -range 0x00010000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_iic_0/S_AXI/Reg] -force
+  assign_bd_address -offset 0x80030000 -range 0x00010000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs xxv_ethernet_0/s_axi_0/Reg] -force
   assign_bd_address -offset 0x00000000 -range 0x80000000 -target_address_space [get_bd_addr_spaces axi_dma_echo/Data_MM2S] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP0/HPC0_DDR_LOW] -force
   assign_bd_address -offset 0xC0000000 -range 0x20000000 -target_address_space [get_bd_addr_spaces axi_dma_echo/Data_MM2S] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP0/HPC0_QSPI] -force
   assign_bd_address -offset 0x00000000 -range 0x80000000 -target_address_space [get_bd_addr_spaces axi_dma_echo/Data_S2MM] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP0/HPC0_DDR_LOW] -force
@@ -1898,11 +1901,11 @@ Port;FD4A0000;FD4AFFFF;1|FPD;DPDMA;FD4C0000;FD4CFFFF;1|FPD;DDR_XMPU5_CFG;FD05000
   exclude_bd_addr_seg -offset 0xFF000000 -range 0x01000000 -target_address_space [get_bd_addr_spaces axi_dma_0/Data_S2MM] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP0/HPC0_LPS_OCM]
   exclude_bd_addr_seg -offset 0x000800000000 -range 0x000100000000 -target_address_space [get_bd_addr_spaces axi_dma_0/Data_SG] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP0/HPC0_DDR_HIGH]
   exclude_bd_addr_seg -offset 0xFF000000 -range 0x01000000 -target_address_space [get_bd_addr_spaces axi_dma_0/Data_SG] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP0/HPC0_LPS_OCM]
-  exclude_bd_addr_seg -target_address_space [get_bd_addr_spaces axi_dma_echo/Data_MM2S] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP0/HPC0_DDR_HIGH]
+  assign_bd_address -target_address_space [get_bd_addr_spaces axi_dma_echo/Data_MM2S] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP0/HPC0_DDR_HIGH] -force
   exclude_bd_addr_seg -offset 0xFF000000 -range 0x01000000 -target_address_space [get_bd_addr_spaces axi_dma_echo/Data_MM2S] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP0/HPC0_LPS_OCM]
-  exclude_bd_addr_seg -target_address_space [get_bd_addr_spaces axi_dma_echo/Data_S2MM] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP0/HPC0_DDR_HIGH]
+  assign_bd_address -target_address_space [get_bd_addr_spaces axi_dma_echo/Data_S2MM] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP0/HPC0_DDR_HIGH] -force
   exclude_bd_addr_seg -offset 0xFF000000 -range 0x01000000 -target_address_space [get_bd_addr_spaces axi_dma_echo/Data_S2MM] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP0/HPC0_LPS_OCM]
-  exclude_bd_addr_seg -target_address_space [get_bd_addr_spaces axi_dma_echo/Data_SG] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP0/HPC0_DDR_HIGH]
+  assign_bd_address -target_address_space [get_bd_addr_spaces axi_dma_echo/Data_SG] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP0/HPC0_DDR_HIGH] -force
   exclude_bd_addr_seg -offset 0xFF000000 -range 0x01000000 -target_address_space [get_bd_addr_spaces axi_dma_echo/Data_SG] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP0/HPC0_LPS_OCM]
 
   # Perform GUI Layout
@@ -2062,9 +2065,49 @@ pagesize -pg 1 -db -bbox -sgen -330 -100 6210 2880
   # Restore current instance
   current_bd_instance $oldCurInst
 
+  # ---- DMA-echo loopback fix (2026-06-10): pure-PL axis_data_fifo passthrough ----
+  # Was: MM2S -> axi_dma_fifo_echo(AXI_STR_RXD) and AXI_STR_TXD -> S2MM through an
+  # axi_fifo_mm_s, which forced the CPU to copy RDFD->TDFD. Under Linux that 64-bit
+  # re-injection swapped the 32-bit halves of each beat (data mismatch). Match
+  # kr260_hw: pass the DMA stream MM2S -> axis_data_fifo -> S2MM straight through in
+  # PL so the CPU never touches the data. axi_dma_fifo_echo is retained (still
+  # UIO-exposed) as a self-loopback so its AXI_STR ports are not left dangling.
+  set axis_data_fifo [ create_bd_cell -type ip -vlnv xilinx.com:ip:axis_data_fifo:2.0 axis_data_fifo ]
+  set_property -dict [list \
+    CONFIG.TDATA_NUM_BYTES {8} \
+    CONFIG.FIFO_DEPTH {1024} \
+    CONFIG.HAS_TLAST {1} \
+    CONFIG.HAS_TKEEP {1} \
+  ] $axis_data_fifo
+  delete_bd_objs [get_bd_intf_nets axi_dma_echo_M_AXIS_MM2S]
+  delete_bd_objs [get_bd_intf_nets axi_fifo_echo_AXI_STR_TXD]
+  connect_bd_intf_net [get_bd_intf_pins axi_dma_echo/M_AXIS_MM2S] [get_bd_intf_pins axis_data_fifo/S_AXIS]
+  connect_bd_intf_net [get_bd_intf_pins axis_data_fifo/M_AXIS] [get_bd_intf_pins axi_dma_echo/S_AXIS_S2MM]
+  connect_bd_intf_net [get_bd_intf_pins axi_dma_fifo_echo/AXI_STR_TXD] [get_bd_intf_pins axi_dma_fifo_echo/AXI_STR_RXD]
+  connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] [get_bd_pins axis_data_fifo/s_axis_aclk]
+  connect_bd_net [get_bd_pins proc_sys_reset_0/peripheral_aresetn] [get_bd_pins axis_data_fifo/s_axis_aresetn]
+
+  # ---- Standalone-FIFO fix (2026-06-10): replace axi_fifo_echo (axi_fifo_mm_s,
+  # whose TXD->RXD loopback fires a Transmit Size Error (TSE) on TLR commit) with
+  # kr260_hw's custom simple_fifo (AXI4-Lite: push@+0 W / pop@+0 R, count@+4,
+  # status@+8, reset@+0xC). Removes the axi_fifo_mm_s and its two mux ports
+  # (M16 ctrl / M17 data), self-loop, and interrupt; the freed xlconcat_1/In1 is
+  # tied to 0 and M17 is left unused (still clocked/reset, no AXI master). ----
+  update_compile_order -fileset sources_1
+  delete_bd_objs [get_bd_cells axi_fifo_echo]
+  set fifo_irq_zero [ create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 fifo_irq_zero ]
+  set_property -dict [list CONFIG.CONST_VAL {0} CONFIG.CONST_WIDTH {1}] $fifo_irq_zero
+  connect_bd_net [get_bd_pins fifo_irq_zero/dout] [get_bd_pins xlconcat_1/In1]
+  set simple_fifo_echo [ create_bd_cell -type module -reference simple_fifo simple_fifo_echo ]
+  connect_bd_intf_net [get_bd_intf_pins slave_axi_mux/M16_AXI] [get_bd_intf_pins simple_fifo_echo/S_AXI]
+  connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] [get_bd_pins simple_fifo_echo/s_axi_aclk]
+  connect_bd_net [get_bd_pins proc_sys_reset_0/peripheral_aresetn] [get_bd_pins simple_fifo_echo/s_axi_aresetn]
+  set sf_seg [get_bd_addr_segs -of_objects [get_bd_intf_pins simple_fifo_echo/S_AXI]]
+  assign_bd_address -offset 0x80100000 -range 0x00010000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] $sf_seg -force
+
   validate_bd_design
   save_bd_design
-  close_bd_design $design_name 
+  close_bd_design $design_name
 }
 # End of cr_bd_kr260_starter_kit()
 

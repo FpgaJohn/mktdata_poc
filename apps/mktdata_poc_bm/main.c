@@ -11,15 +11,15 @@
  *                          DMA is programmed to push data into the FIFO's RXD,
  *                          then read it back out of the FIFO's TXD into DDR.
  *
- * Address map matches vivado/mktdata_poc.tcl (HPM0_FPD aperture, 0xA000_0000+).
+ * Address map matches vivado/mktdata_poc.tcl (HPM0_LPD aperture, 0x8000_0000+).
  *
- *   axi_gpio_control      0xA0040000  ch1=2-bit ctrl out, ch2=32-bit addend out
- *   axi_gpio_value        0xA00C0000  ch1=32-bit sum in, ch2=32-bit carry in
- *   axi_fifo_echo (lite)  0xA0100000  control regs (TDFR/TLR/RDFO/...)
- *   axi_fifo_echo (full)  0xA0110000  data port (TDFD at +0, RDFD at +0x1000)
- *   axi_dma_echo (lite)   0xA00D0000  AXI DMA control regs
- *   axi_dma_fifo_echo c   0xA00E0000  data-path FIFO between DMA MM2S and S2MM
- *   axi_dma_fifo_echo d   0xA00F0000
+ *   axi_gpio_control      0x80040000  ch1=2-bit ctrl out, ch2=32-bit addend out
+ *   axi_gpio_value        0x800C0000  ch1=32-bit sum in, ch2=32-bit carry in
+ *   axi_fifo_echo (lite)  0x80100000  control regs (TDFR/TLR/RDFO/...)
+ *   axi_fifo_echo (full)  0x80110000  data port (TDFD at +0, RDFD at +0x1000)
+ *   axi_dma_echo (lite)   0x800D0000  AXI DMA control regs
+ *   axi_dma_fifo_echo c   0x800E0000  data-path FIFO between DMA MM2S and S2MM
+ *   axi_dma_fifo_echo d   0x800F0000
  */
 
 #include <stdint.h>
@@ -31,13 +31,13 @@
 #include "xparameters.h"
 
 /* ---- Address map (matches vivado/mktdata_poc.tcl) ---- */
-#define ADDR_GPIO_CONTROL       0xA0040000UL
-#define ADDR_GPIO_VALUE         0xA00C0000UL
-#define ADDR_FIFO_ECHO_CTRL     0xA0100000UL
-#define ADDR_FIFO_ECHO_DATA     0xA0110000UL
-#define ADDR_DMA_ECHO           0xA00D0000UL
-#define ADDR_DMA_FIFO_ECHO_CTRL 0xA00E0000UL
-#define ADDR_DMA_FIFO_ECHO_DATA 0xA00F0000UL
+#define ADDR_GPIO_CONTROL       0x80040000UL
+#define ADDR_GPIO_VALUE         0x800C0000UL
+#define ADDR_FIFO_ECHO_CTRL     0x80100000UL
+#define ADDR_FIFO_ECHO_DATA     0x80110000UL
+#define ADDR_DMA_ECHO           0x800D0000UL
+#define ADDR_DMA_FIFO_ECHO_CTRL 0x800E0000UL
+#define ADDR_DMA_FIFO_ECHO_DATA 0x800F0000UL
 
 /* ---- AXI GPIO (PG144) — dual-channel layout ---- */
 #define GPIO_DATA   0x00   /* channel 1 */

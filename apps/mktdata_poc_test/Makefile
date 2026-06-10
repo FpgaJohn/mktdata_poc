@@ -16,7 +16,7 @@ CC = aarch64-linux-gnu-gcc
 CFLAGS ?= -O2 -Wall -Wextra -std=gnu11
 
 REMOTE_HOST ?= kr260u
-REMOTE_PATH ?= /tmp/
+REMOTE_PATH ?= /home/ubuntu/
 
 .PHONY: all clean deploy run
 

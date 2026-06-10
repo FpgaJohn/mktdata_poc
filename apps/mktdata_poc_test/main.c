@@ -37,20 +37,20 @@
 #include <unistd.h>
 
 /* ---- Address map (matches vivado/mktdata_poc.tcl, HPM0_FPD aperture) ---- */
-#define ADDR_GPIO_CONTROL       0xA0040000UL
-#define ADDR_GPIO_VALUE         0xA00C0000UL
-#define ADDR_FIFO_MDEBUG_CTRL   0xA0050000UL
-#define ADDR_FIFO_MDEBUG_DATA   0xA0060000UL
-#define ADDR_FIFO_DEBUG_CTRL    0xA0070000UL
-#define ADDR_FIFO_DEBUG_DATA    0xA0080000UL
-#define ADDR_GPIO_1             0xA0090000UL
-#define ADDR_FIFO_CMD_CTRL      0xA00A0000UL
-#define ADDR_FIFO_CMD_DATA      0xA00B0000UL
-#define ADDR_FIFO_ECHO_CTRL     0xA0100000UL
-#define ADDR_FIFO_ECHO_DATA     0xA0110000UL
-#define ADDR_DMA_ECHO           0xA00D0000UL
-#define ADDR_DMA_FIFO_ECHO_CTRL 0xA00E0000UL
-#define ADDR_DMA_FIFO_ECHO_DATA 0xA00F0000UL
+#define ADDR_GPIO_CONTROL       0x80040000UL
+#define ADDR_GPIO_VALUE         0x800C0000UL
+#define ADDR_FIFO_MDEBUG_CTRL   0x80050000UL
+#define ADDR_FIFO_MDEBUG_DATA   0x80060000UL
+#define ADDR_FIFO_DEBUG_CTRL    0x80070000UL
+#define ADDR_FIFO_DEBUG_DATA    0x80080000UL
+#define ADDR_GPIO_1             0x80090000UL
+#define ADDR_FIFO_CMD_CTRL      0x800A0000UL
+#define ADDR_FIFO_CMD_DATA      0x800B0000UL
+#define ADDR_FIFO_ECHO_CTRL     0x80100000UL
+#define ADDR_FIFO_ECHO_DATA     0x80110000UL
+#define ADDR_DMA_ECHO           0x800D0000UL
+#define ADDR_DMA_FIFO_ECHO_CTRL 0x800E0000UL
+#define ADDR_DMA_FIFO_ECHO_DATA 0x800F0000UL
 #define MAP_SIZE                0x10000UL
 
 /* ---- AXI GPIO v2.0 ---- */
@@ -76,6 +76,16 @@
 #define FIFO_AXI4_RDFD  0x1000
 
 #define FIFO_RESET_MAGIC  0xA5
+
+/* ---- simple_fifo (custom AXI4-Lite slave; replaces axi_fifo_echo) ----
+ * push@+0 W / pop@+0 R, count@+4 R, status@+8 R (bit0=empty bit1=full),
+ * reset@+0xC W. 32-bit storage: a 64-bit word is two pushes (lo then hi). */
+#define SF_DATA    0x00
+#define SF_COUNT   0x04
+#define SF_STATUS  0x08
+#define SF_RESET   0x0C
+#define SF_STATUS_EMPTY  0x1u
+#define SF_STATUS_FULL   0x2u
 
 /* ---- AXI DMA (PG021), SG mode (axi_dma_echo has c_sg_length_width=16) ---- */
 #define DMA_MM2S_DMACR        0x00
@@ -243,66 +253,59 @@ static int test_accumulator(volatile uint32_t *ctrl, volatile uint32_t *val)
 
 /* ---- Test 2: axi_fifo_echo (TXD->RXD loopback) ---- */
 
-static int test_axi_fifo(volatile uint32_t *ctrl, volatile uint32_t *data)
+static int test_axi_fifo(volatile uint32_t *fifo)
 {
-    printf("\n===== axi_fifo_echo (AXI-S FIFO TXD->RXD loopback) =====\n");
+    printf("\n===== simple_fifo push/pop (64-bit-word echo) =====\n");
     int fails = 0;
 
-    w32(ctrl, FIFO_SRR, FIFO_RESET_MAGIC);
-    usleep(1000);
-    w32(ctrl, FIFO_TDFR, FIFO_RESET_MAGIC);
-    w32(ctrl, FIFO_RDFR, FIFO_RESET_MAGIC);
-    usleep(1000);
-    w32(ctrl, FIFO_ISR, 0xFFFFFFFFu);
-
-    uint32_t tdfv = r32(ctrl, FIFO_TDFV);
-    uint32_t rdfo = r32(ctrl, FIFO_RDFO);
-    printf("  post-reset: TDFV=%u RDFO=%u\n", tdfv, rdfo);
-    if (rdfo != 0) {
-        fprintf(stderr, "  FIFO not empty after reset (RDFO=%u)\n", rdfo);
+    w32(fifo, SF_RESET, 1);
+    uint32_t status = r32(fifo, SF_STATUS);
+    uint32_t count  = r32(fifo, SF_COUNT);
+    printf("  post-reset: STATUS=0x%x (empty=%d full=%d)  COUNT=%u\n",
+           status, !!(status & SF_STATUS_EMPTY), !!(status & SF_STATUS_FULL), count);
+    if (!(status & SF_STATUS_EMPTY) || count != 0) {
+        fprintf(stderr, "  FIFO not empty after reset\n");
         return 1;
     }
 
-    /* 64-bit AXI4 data port: each transaction = one beat. Use 64-bit accesses. */
-    enum { N_WORDS = 16 };  /* 16 x 64-bit words = 128 bytes */
+    /* 16 logical 64-bit words = 32 x 32-bit pushes (lo first, then hi). */
+    enum { N_WORDS = 16 };
     uint64_t tx[N_WORDS], rx[N_WORDS];
     for (int i = 0; i < N_WORDS; i++)
-        tx[i] = 0xCAFE000000000000ULL + (uint64_t)i * 0x100000010ULL + 1;
+        tx[i] = 0xCAFE000000000001ULL + (uint64_t)i * 0x100000010ULL;
 
-    volatile uint64_t *data64 = (volatile uint64_t *)data;
     for (int i = 0; i < N_WORDS; i++) {
-        data64[FIFO_AXI4_TDFD / 8] = tx[i];
-        asm volatile("dsb sy" ::: "memory");
+        w32(fifo, SF_DATA, (uint32_t)(tx[i] & 0xFFFFFFFFu));
+        w32(fifo, SF_DATA, (uint32_t)(tx[i] >> 32));
     }
-    w32(ctrl, FIFO_TLR, N_WORDS * 8);
 
-    int spin = 0;
-    while (r32(ctrl, FIFO_RDFO) < N_WORDS && spin < 1000000) spin++;
-    rdfo = r32(ctrl, FIFO_RDFO);
-    uint32_t rlr = r32(ctrl, FIFO_RLR);
-    printf("  after push+TLR: RDFO=%u RLR=%u (expected %u, %u bytes)\n",
-           rdfo, rlr, N_WORDS, N_WORDS * 8);
-
-    if (rdfo < N_WORDS || rlr != N_WORDS * 8) {
-        fprintf(stderr, "  loopback didn't deliver -- RDFO/RLR mismatch\n");
+    count = r32(fifo, SF_COUNT);
+    printf("  after %d 64-bit pushes: COUNT=%u (expected %u)\n",
+           N_WORDS, count, N_WORDS * 2);
+    if (count != (uint32_t)(N_WORDS * 2)) {
+        fprintf(stderr, "  COUNT mismatch -- pushes didn't all land\n");
         return 1;
     }
 
     for (int i = 0; i < N_WORDS; i++) {
-        asm volatile("dsb sy" ::: "memory");
-        rx[i] = data64[FIFO_AXI4_RDFD / 8];
+        uint32_t lo = r32(fifo, SF_DATA);
+        uint32_t hi = r32(fifo, SF_DATA);
+        rx[i] = ((uint64_t)hi << 32) | lo;
     }
 
-    int ok = (memcmp(tx, rx, sizeof(tx)) == 0);
+    count  = r32(fifo, SF_COUNT);
+    status = r32(fifo, SF_STATUS);
+    int ok = (memcmp(tx, rx, sizeof(tx)) == 0) && (count == 0) &&
+             (status & SF_STATUS_EMPTY);
     if (!ok) {
-        for (int i = 0; i < N_WORDS; i++) {
+        for (int i = 0; i < N_WORDS; i++)
             if (tx[i] != rx[i])
                 printf("    [%2d] tx=0x%016" PRIx64 " rx=0x%016" PRIx64 " MISMATCH\n",
                        i, tx[i], rx[i]);
-        }
         fails++;
     }
-    printf("  echo of %d 64-bit words: %s\n", N_WORDS, ok ? "PASS" : "FAIL");
+    printf("  echo of %d 64-bit words: %s (COUNT=%u STATUS=0x%x)\n",
+           N_WORDS, ok ? "PASS" : "FAIL", count, status);
     return fails;
 }
 
@@ -433,25 +436,12 @@ static int test_dma_fifo(volatile uint32_t *dma,
 
     fails += dma_wait_idle(dma, DMA_MM2S_DMASR, "MM2S");
 
-    if (!fails) {
-        uint32_t rdfo = r32(fifo_ctrl, FIFO_RDFO);
-        uint32_t rlr  = r32(fifo_ctrl, FIFO_RLR);
-        printf("  FIFO after MM2S: RDFO=%u RLR=%u\n", rdfo, rlr);
-        if (rdfo < buf_sz / 8 || rlr != buf_sz) {
-            fprintf(stderr, "  FIFO didn't receive full packet -- RDFO/RLR off\n");
-            fails++;
-        } else {
-            volatile uint64_t *fd64 = (volatile uint64_t *)fifo_data;
-            for (uint32_t i = 0; i < buf_sz / 8; i++) {
-                asm volatile("dsb sy" ::: "memory");
-                uint64_t w = fd64[FIFO_AXI4_RDFD / 8];
-                fd64[FIFO_AXI4_TDFD / 8] = w;
-                asm volatile("dsb sy" ::: "memory");
-            }
-            w32(fifo_ctrl, FIFO_TLR, buf_sz);
-            fails += dma_wait_idle(dma, DMA_S2MM_DMASR, "S2MM");
-        }
-    }
+    /* The DMA stream now loops MM2S -> axis_data_fifo -> S2MM entirely in PL
+     * (no CPU RDFD->TDFD re-injection, which used to swap the 32-bit halves of
+     * each 64-bit beat). Just wait for the receive side to finish. */
+    (void)fifo_data;
+    if (!fails)
+        fails += dma_wait_idle(dma, DMA_S2MM_DMASR, "S2MM");
 
     dcache_invalidate_range(rx, buf_sz);
 
@@ -481,19 +471,18 @@ static int test_dma_fifo(volatile uint32_t *dma,
 static int cmd_test(void)
 {
     printf("Opening UIOs:\n");
-    int fd_c, fd_v, fd_fc, fd_fd, fd_d, fd_dfc, fd_dfd;
+    int fd_c, fd_v, fd_fc, fd_d, fd_dfc, fd_dfd;
     volatile uint32_t *ctrl      = map_uio(ADDR_GPIO_CONTROL,       "axi_gpio_control",     &fd_c);
     volatile uint32_t *val       = map_uio(ADDR_GPIO_VALUE,         "axi_gpio_value",       &fd_v);
-    volatile uint32_t *fifo_ctrl = map_uio(ADDR_FIFO_ECHO_CTRL,     "axi_fifo_echo (ctrl)", &fd_fc);
-    volatile uint32_t *fifo_data = map_uio(ADDR_FIFO_ECHO_DATA,     "axi_fifo_echo (data)", &fd_fd);
+    volatile uint32_t *fifo      = map_uio(ADDR_FIFO_ECHO_CTRL,     "simple_fifo (echo)",   &fd_fc);
     volatile uint32_t *dma       = map_uio(ADDR_DMA_ECHO,           "axi_dma_echo",         &fd_d);
     volatile uint32_t *dfc       = map_uio(ADDR_DMA_FIFO_ECHO_CTRL, "axi_dma_fifo_echo c",  &fd_dfc);
     volatile uint32_t *dfd       = map_uio(ADDR_DMA_FIFO_ECHO_DATA, "axi_dma_fifo_echo d",  &fd_dfd);
-    if (!ctrl || !val || !fifo_ctrl || !fifo_data || !dma || !dfc || !dfd) return 1;
+    if (!ctrl || !val || !fifo || !dma || !dfc || !dfd) return 1;
 
     int fails = 0;
     fails += test_accumulator(ctrl, val);
-    fails += test_axi_fifo(fifo_ctrl, fifo_data);
+    fails += test_axi_fifo(fifo);
     fails += test_dma_fifo(dma, dfc, dfd);
 
     printf("\n=========================================\n");

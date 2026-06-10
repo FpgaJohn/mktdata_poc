@@ -13,4 +13,102 @@
 ✅ 13 - Add a rule to the Makefile in the root of this repository to display all resources that are part of this design
 ✅ 14 - Add a rule to display only the GPIOs
 ✅ 15 - And a rule for only the FIFOs
-✅ 16 - And a rule for the DMA FIFOs 
+✅ 16 - And a rule for the DMA FIFOs
+
+✅ 17 - [FIXED 2026-06-10 by the HPM0_FPD->LPD control-plane move, NOT the single-channel
+        split.] The dual-channel axi_gpio accumulator now passes all Linux tests. Root cause
+        was the FPD control path, not the bug.txt synth-trim theory: moving PS-PL control to
+        M_AXI_HPM0_LPD (0x80xx_xxxx aperture) made the ch2 (+0x08 addend) writes land. The
+        planned single-channel GPIO split was NOT needed. See item 18 for the full LPD change.
+
+   (orig) Fix the accumulator GPIO so it works under Linux (currently FAILs; works in bare-metal).
+        Root cause: axi_gpio_control is a single DUAL-channel AXI GPIO (C_GPIO_WIDTH=2):
+          ch1 gpio_io_o  -> my_state_0/control (opcode) @ 0xA0040000+0x00
+          ch2 gpio2_io_o -> my_state_0/value   (addend) @ 0xA0040000+0x08  <-- ch2 write vanishes under Linux/UIO
+        Under Linux the ch2 (addend) write is dropped, so it always adds 0 and the
+        accumulator stays 0. Confirmed 2026-06-09 via both mktdata_poc_test and raw
+        devmem (scripts/gpio.sh). Bare-metal passes (bm.log), so it's a Linux/dual-channel
+        AXI-GPIO interaction, not an RTL logic bug.
+        Fix: split into separate SINGLE-channel axi_gpio instances (one for opcode, one
+        for the 32-bit addend; likewise split axi_gpio_value sum/carry if it shows the
+        same issue) -- the kr260_hw design does it this way.
+        Touches: vivado/mktdata_poc.tcl (BD), address map, apps/*/main.c,
+        kria_app/mktdata_poc.dtso; then rebuild XSA (make xsa) + repackage/redeploy Kria app.
+
+✅ 18 - [DONE 2026-06-10] ALL THREE LINUX TESTS PASS (GPIO + simple_fifo + DMA echo).
+        Final fix: replaced the standalone axi_fifo_echo (axi_fifo_mm_s) with kr260_hw's
+        custom simple_fifo.v (vivado/ip/simple_fifo.v) -- the Xilinx IP fired a Transmit
+        Size Error (TSE, ISR bit 25) on the TXD->RXD loopback TLR commit (confirmed via
+        on-board devmem probe; kr260 documented the same dead-end). simple_fifo is AXI4-Lite
+        push@+0/pop@+0/count@+4/status@+8/reset@+0xC, no TLR. BD delta swaps it onto mux M16
+        @ 0x80100000, ties freed xlconcat_1/In1 to 0, leaves M17 unused. dtso collapsed to
+        one node; test_axi_fifo rewritten for push/pop. Full chain of fixes that got here:
+          (1) axi_dma_echo c_addr_width=49 + map HPC0_DDR_HIGH (Linux hugepage is >4GB)
+          (2) control plane HPM0_FPD -> HPM0_LPD (0xA0->0x80) -- fixed GPIO dual-channel
+              AND the DMA hang (the real GPIO root cause was FPD, not bug.txt synth-trim)
+          (3) DMA echo loopback: axi_fifo_mm_s + CPU RDFD->TDFD re-injection (swapped 32-bit
+              halves) -> pure-PL axis_data_fifo passthrough
+          (4) standalone FIFO: axi_fifo_mm_s (TSE) -> simple_fifo.v
+        Deploy gotcha each cycle: dfx-mgr wedges ("remove from slot 0 returns: -1"); clear
+        with `rmdir /sys/kernel/config/device-tree/overlays/mktdata_poc_image_*` then reload.
+
+   (history) [UPDATE 2026-06-10 PM] DMA echo now PASSES. Replaced the CPU-bridged
+        axi_fifo_mm_s loopback (axi_dma_fifo_echo, needed manual 64-bit RDFD->TDFD copy
+        that swapped 32-bit halves) with a pure-PL axis_data_fifo:2.0 passthrough
+        (TDATA_NUM_BYTES=8, FIFO_DEPTH=1024, HAS_TLAST/HAS_TKEEP=1) wired
+        MM2S->axis_data_fifo->S2MM, matching kr260_hw. Delta TCL inserted before
+        validate_bd_design in mktdata_poc.tcl; test_dma_fifo() drops the re-injection and
+        just waits for S2MM. axi_dma_fifo_echo kept as a self-loopback (no dangling ports).
+        VERIFIED on board: "DMA-FIFO echo: PASS (4096 bytes round-tripped)". GPIO also PASS.
+        ONLY REMAINING FAILURE: standalone axi_fifo_echo TXD->RXD loopback (test 2) still
+        RDFO=0 -- 64-bit writes to its AXI4 TDFD port don't loop back; check axi_fifo_echo
+        C_S_AXI4_DATA_WIDTH vs the test's 64-bit access (likely test-code fix, no rebuild).
+
+   (was) [PARTIAL 2026-06-10] Applied kr260_hw's fixes to mktdata_poc: (a) axi_dma_echo
+        c_addr_width=49 + map HPC0_DDR_HIGH (was excluded) + AFI0_COHERENCY=1 + dma-coherent;
+        (b) control plane M_AXI_HPM0_FPD -> M_AXI_HPM0_LPD, all PL slaves 0xA0xx->0x80xx
+        (tcl + dtso + 3x main.c + gpio.sh). RESULT: GPIO accumulator now PASSES (item 17),
+        and the DMA HANG is GONE -- MM2S+S2MM complete, FIFO gets full packet. Two issues
+        REMAIN: (1) DMA-FIFO echo data mismatch -- 32-bit halves swapped within each 64-bit
+        word (rx[1]=tx[0], rx[2]=tx[3]); likely the test's manual RDFD->TDFD re-injection or
+        a TDATA lane mapping, exposed now that the DMA actually runs. (2) standalone
+        axi_fifo_echo TXD->RXD loopback still delivers nothing (RDFO=0) -- separate from the
+        clock, since axi_dma_fifo_echo on the same pl_clk0 now works. NOTE: deploy gotcha --
+        dfx-mgr wedged on the old overlay; had to `rmdir /sys/kernel/config/device-tree/
+        overlays/mktdata_poc_image_1` then reload, and recompile the test binary for 0x80.
+
+   (orig) FIFO echo + DMA echo FAIL under Linux but PASS in bare-metal (same Jun-8 bitstream).
+        Observed 2026-06-09: axi_fifo_echo loopback delivers nothing (RDFO=0, expected 16)
+        and axi_dma_echo MM2S times out (SR stays 0x00010009 = halted, never started).
+        AXI-lite control plane is alive (register reads OK), and both failing IPs are on
+        pl_clk0 (100 MHz, same clock as the working control plane) -- so NOT a clock issue.
+
+        DETERMINED 2026-06-09 by comparing against ~/work/kr260/kr260_hw (the "fixed"
+        reference design whose FIFO+DMA pass under Linux). kr260_hw/CLAUDE.md + bug.txt
+        document the exact fixes; mktdata_poc never applied them:
+
+        DMA root cause -- HP fabric-port / coherency not set up under Linux.
+          kr260_hw note (verbatim): "if DMA passes in bare-metal but hangs under Linux,
+          the bitstream is fine and dfx-mgr's PS init is missing something (AFI / HP
+          fabric-port enable)." That is exactly our case.
+          - mktdata_poc: DMA->DDR via S_AXI_HPC0_FPD but PSU__AFI0_COHERENCY=0 and the
+            dtso axi_dma_echo node has NO dma-coherent. -> HPC0 port never opened at
+            runtime, DMA's first DDR access stalls, SR stuck halted, timeout.
+          - kr260_hw: same HPC0_FPD but PSU__AFI0_COHERENCY=1 + dma-coherent in dtso.
+          - Bare-metal works because load.tcl manually does AFI-deassert + isolation
+            removal; Linux relies on the design being declared coherent.
+          FIX: set CONFIG.PSU__AFI0_COHERENCY {1} in vivado/mktdata_poc.tcl and add
+          `dma-coherent;` to axi_dma_echo@a00d0000 in kria_app/mktdata_poc.dtso, rebuild.
+
+        Control-plane note: mktdata_poc control is on M_AXI_HPM0_FPD (0xA0...); kr260_hw
+        moved it to HPM0_LPD (0x80...) to avoid an FPD fabric deadlock. But mktdata_poc
+        DMA PASSES in bare-metal with FPD control, so the FPD deadlock is NOT the active
+        failure here -- the HPM0_LPD move is likely NOT required and is high-churn (every
+        addr 0xA0->0x80, all 3 main.c + dtso + gpio.sh). Try the coherency fix first.
+
+        FIFO echo: kr260_hw's passing FIFO is a DIFFERENT, simpler IP (custom simple_fifo,
+        AXI-Lite register push/pop) -- not comparable to mktdata_poc's Xilinx axi_fifo_mm_s
+        AXI-Stream FIFO with TXD->RXD PL loopback. Both mktdata_poc data-path tests use
+        Xilinx AXI-Stream FIFO IPs and both fail under Linux while pure-register paths work,
+        so likely the same dfx-mgr/PL data-path init gap; no single dtso line pinpoints it
+        the way the DMA does. Re-test the FIFO after the DMA coherency fix lands.

@@ -112,3 +112,51 @@
         Xilinx AXI-Stream FIFO IPs and both fail under Linux while pure-register paths work,
         so likely the same dfx-mgr/PL data-path init gap; no single dtso line pinpoints it
         the way the DMA does. Re-test the FIFO after the DMA coherency fix lands.
+
+ℹ️ 19 - [INVESTIGATION 2026-06-11] Can axi_fifo_mm_s replace the custom simple_fifo for the
+        echo test? NO -- confirmed it cannot drive a TXD->RXD echo from Linux userspace.
+        Findings (all evidence-based on hw):
+          - axi_fifo_mm_s echo PASSES in bare-metal (bm.log: TC=1 RC=1 RDFO=16) but fires
+            TSE (ISR bit 25) under Linux on every TLR commit, for every push-count/TLR combo.
+          - Root cause is NOT TLR units (swept, all TSE), NOT the compiler (push is a single
+            `str x` 64-bit store, confirmed by objdump), and NOT the HPM0_LPD master width:
+            tried PSU__MAXIGP2__DATA_WIDTH 32 vs 128 -- TSE persists at both. Under Linux each
+            64-bit write to the FIFO's AXI4 data port lands as ~2 beats (16 pushes drop TDFV
+            by ~30-32 vs bare-metal's 14), breaking packet framing -> TSE. It's a Linux
+            UIO/MMIO access-path effect, unresolved but definitively not master width.
+          - BONUS (important): the dual-channel axi_gpio accumulator REQUIRES the 32-bit
+            (narrow) LPD master. Setting PSU__MAXIGP2__DATA_WIDTH=128 BROKE the accumulator
+            (ch2 +0x08 addend writes vanish again). So item 17's GPIO fix was really the
+            *narrow* LPD master (LPD defaults to 32), not the FPD->LPD switch by itself.
+            mktdata_poc.tcl now sets PSU__MAXIGP2__DATA_WIDTH {32} EXPLICITLY -- do not raise.
+        CONCLUSION: keep simple_fifo (32-bit register push/pop works on the narrow master);
+        keep the LPD master at 32-bit. axi_fifo_mm_s stays only for RX-only capture
+        (cmd/debug/mdebug, C_USE_TX_DATA=0 -> no TX -> no TSE).
+
+❌ 20 - [INVESTIGATION 2026-06-11] Goal: make GPIO + FIFO + DMA-FIFO work in 64-bit mode.
+        OUTCOME: not achievable for register PIO; reverted to the committed 32-bit design.
+        Key findings (all evidence-based on hw):
+          - 64-bit CPU PIO from Linux userspace (UIO mmap) to the PL NARROWS to 32-bit.
+            Proven with explicit `str x`/`ldr x` asm to a fully 64-bit AXI path
+            (HPM0_FPD 64b master -> smartconnect 64b -> custom 64-bit AXI4 simple_fifo,
+            all widths confirmed in the .hwh): pushed 0xDEADBEEF12345678, popped
+            0x1234567812345678 -> high 32 lost, low 32 replicated on both lanes = a
+            32-bit transaction on a 64-bit bus. The narrowing is on the APU->HPM path,
+            upstream of the PL fabric -- a platform limit, not a BD/IP bug.
+          - Wide (64/128-bit) HPM0_LPD master BREAKS 32-bit register writes: the
+            axi_interconnect:2.1 64->32 downsizer DROPS writes to the high half of a
+            64-bit word (addr[2]=1, e.g. DMA CURDESC_MSB @ +0x0C) -> DMA can't reach
+            DDR_HIGH, hangs. So the shared LPD master must stay 32-bit.
+          - Option A (replace slave_axi_mux with smartconnect): dead -- smartconnect
+            caps at 16 MI (we have 18 mixed-width slaves) unless all-AXI4Lite.
+          - Option B (dedicated 64-bit HPM0_FPD path for the FIFO): smartconnect path
+            narrows to 32-bit (above); DIRECT HPM0_FPD->custom-AXI4-slave HUNG the board
+            (custom slave didn't satisfy the full-AXI4 master, e.g. missing AWUSER/ARUSER).
+        WHAT SURVIVED THE EXPERIMENT (not kept in the revert, but proven to work):
+          - GPIO single-channel split (axi_gpio_control opcode + new axi_gpio_addend):
+            works on a wide master, unlike the dual-channel (whose ch2 +0x08 write
+            vanishes on a wide master). This is the real reason the FPD->LPD move "fixed"
+            the GPIO -- LPD defaulted to 32-bit. Re-apply if a wide master is ever needed.
+        CONCLUSION: register PIO to the PL is 32-bit-only from Linux on this board; move
+        genuine 64-bit data with the DMA engine, not CPU push/pop. The 32-bit simple_fifo
+        (which carries 64-bit logical words as paired 32-bit pushes) is the PIO ceiling.

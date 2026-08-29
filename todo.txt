@@ -160,3 +160,40 @@
         CONCLUSION: register PIO to the PL is 32-bit-only from Linux on this board; move
         genuine 64-bit data with the DMA engine, not CPU push/pop. The 32-bit simple_fifo
         (which carries 64-bit logical words as paired 32-bit pushes) is the PIO ceiling.
+
+✅ 21 - [DONE 2026-07-15] Timing: WNS -2.47 -> -0.25 ns via new LabVIEW netlist + CDC
+        exceptions. Two changes, verified on clean rebuilds:
+        (1) Re-imported the 2026-07-14 LabVIEW export (barrel-shifter rework per
+            recommendations.txt): dcp -> write_verilog -> vivado/ip/NiFpgaAG_poc_ip_kria.v
+            (22.6 MB -> 15.6 MB). Wrapper VHDL unchanged. Intra-clock clk_pl_0 worst path
+            improved -2.0 -> -1.23 ns. NOTE: make xsa does NOT track the netlist as a
+            dependency -- use make xsa-clean first or the rebuild is a silent no-op.
+        (2) Added set_max_delay -datapath_only between clk_pl_0 <-> S02_ACLK_1 (the 10G
+            RX-recovered 156.25 MHz userclk) in vivado/constraints.xdc. This pair was
+            "No Common Clock / Partial False Path (unsafe)" with ~3.4k failing endpoints
+            at a fictitious 0.4 ns requirement; NI's exported constraints already bound
+            every OTHER pair the same way (max_delay = one source period) but missed this
+            one. Chose max_delay over set_clock_groups so NI's existing bounds aren't
+            overridden. Safe because inter-loop data goes through LabVIEW FIFOs and
+            ctrlind_20_ip_reset (axi_gpio_1) is set-and-forget through DoubleSync.
+        VERIFIED: report_clock_interaction now shows every cross-clock pair
+        "Ignored / Max Delay Datapath Only" with positive margin (S02->pl0 +2.94,
+        pl0->S02 +7.12); report_cdc severity counts identical before/after (no new
+        criticals, nothing newly masked). REMAINING: WNS -0.251 / TNS -8.4 / 90 endpoints,
+        ALL intra-clock clk_pl_0 inside the NI IP: FPGAwFIFOn4 RDCLK -> bats_parser ->
+        FPGAwFIFOn1 DIN (the FIFO->parser->FIFO iteration path). That last ~0.25 ns is
+        LabVIEW-side (one more pipeline stage in bats_parser), not fixable here.
+
+✅ 22 - [DONE 2026-07-26] Timing CLOSED: WNS -0.251 -> +0.863 ns (TNS 0, zero failing
+        endpoints; hold WHS +0.010 and pulse width met) with the 2026-07-26 LabVIEW
+        re-export. Flow: wrapper VHDL byte-identical (no BD changes); dcp ->
+        write_verilog -> vivado/ip/NiFpgaAG_poc_ip_kria.v (15.6 MB -> 14.2 MB);
+        make xsa-clean && make xsa; fresh vivado/mktdata_poc.xsa exported.
+        The old choke point -- zero.out.and.convert's (1<<8n)-1 CARRY8 decrement
+        (s_x_dash_*), which every failing path ran through -- no longer appears in
+        ANY reported path. New worst path: +1.219 ns slack, 8.31 ns, ends at a
+        Feedback Node register inside bats.parser.vi (n_Feedback_Node_4033), i.e.
+        the FIFO->parser->FIFO through-path is now cut by a pipeline register.
+        NOT YET VERIFIED ON HARDWARE: a Feedback Node in the parser is the shape
+        that produced the 2026-07-21 phantom-word bug (advice.pipeline.txt update).
+        Re-run the board tests / parse a known pcap before calling this done.

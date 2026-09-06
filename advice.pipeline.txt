@@ -1,0 +1,254 @@
+================================================================================
+CLOSING THE LAST -0.25 ns: WHERE TO PUT THE FEEDBACK NODE IN bats.parser.vi
+================================================================================
+Written 2026-07-15, after the 2026-07-14 LabVIEW re-export (barrel-shifter
+rework) + the clk_pl_0<->S02_ACLK_1 CDC exceptions in vivado/constraints.xdc
+brought post-route WNS from -2.47 ns to -0.251 ns (see todo.txt #21).
+
+All 90 remaining failing endpoints are ONE path shape, intra-clock on the
+100 MHz clk_pl_0, entirely inside the NI IP. Read straight out of the routed
+timing report (netlist names map back to the diagram):
+
+  FPGAwFIFOn4 read (data.stream input FIFO, FIFO36E2 DOUTP)
+    -> add.data.to.buffer.vi
+         (through zero.out.and.convert.vi and the u64-BE merge inside it)
+    -> the updated `buffer` wire (576-bit, s_buffer_out)
+    -> message-type extraction / case-structure muxing (binenc_muxselect)
+    -> FPGAwFIFOn1 write (output FIFO DIN)
+
+  Worst path: 9.343 ns data path against a 10 ns budget, 15 logic levels,
+  65% routing. The whole read->append->parse->write chain runs in a single
+  Timed Loop tick.
+
+--------------------------------------------------------------------------------
+WHERE THE REGISTER GOES
+--------------------------------------------------------------------------------
+Put the Feedback Node on the `buffer` AND `buffer.length` wires immediately
+after add.data.to.buffer.vi, BEFORE anything downstream reads them.
+
+On page 2 of bats.parser.pdf that is the wire segment between
+add.data.to.buffer.vi's outputs and its three consumers:
+  - new.uxx.be.vi  (Message Length)
+  - new.uxx.be.vi  (Message Type)
+  - the message-dispatch case structure (x21,22,2F AddOrder / x23,24
+    OrderExecuted / x20 Time / default) and compress.buffer.vi
+
+This splits the tick into:
+  stage 1: append the incoming 8 bytes to the buffer
+  stage 2: parse fields out of the (now registered) buffer, write output FIFO
+and cuts the 9.3 ns chain roughly in the middle -- far more margin than the
+0.25 ns needed.
+
+--------------------------------------------------------------------------------
+CONSISTENCY RULE 1: exactly one register per wire crossing the cut -- and
+wires that are already registered get NONE
+--------------------------------------------------------------------------------
+Do NOT blanket-register every signal entering the case structure. Draw one
+line across the diagram right after add.data.to.buffer.vi, then classify
+each wire entering the parse/dispatch side:
+
+NEEDS a Feedback Node (computed THIS tick on the input side of the line):
+  - buffer, buffer.length (the add.data.to.buffer.vi outputs -- the culprits)
+  - Message Length / Message Type (new.uxx.be.vi outputs) -- ONLY if those
+    VIs keep reading the unregistered buffer. Cleaner: move them past the
+    line (feed them from the REGISTERED buffer) -- then they are stage-2
+    logic and need no Feedback Node of their own. Either way is fine; just
+    never mix (one reader on raw buffer + another on registered buffer =
+    one-tick-skew bug).
+  - data.stream.Timestamp (and eof.good/eof.bad if used downstream) -- they
+    belong to THIS tick's input word; unregistered, the output message gets
+    paired with the NEXT word's timestamp.
+
+NO Feedback Node (already registers -- they come from the loop shift
+register / state cluster and add nothing to the timing path):
+  - BATS.Parser.States, Saved.BATS.Parser.State, Hdr Length (U16),
+    Total Counter (U16), Next.Seq.No, msg counters, etc.
+  Adding one anyway skews them ONE EXTRA tick relative to the buffer and
+  desynchronizes the state machine.
+
+DOUBLE-CHECK the case selector: the selector (Message Type) and the data the
+case frames read must see the SAME snapshot of the buffer.
+
+Mental model: after the change, everything downstream of the line operates on
+LAST tick's buffer. For each signal it consumes ask "does this belong to that
+same tick?" Already-registered state does (the state machine was always
+one-tick-registered); fresh combinational products of this tick's input do
+not, so they get registered at the line.
+
+BOTTOM LINE -- 5 Feedback Nodes total (per-wire version, matches the labels
+in bats.parser.3.vi.pdf), all in the "Read.Msg" frame:
+  1. buffer          (add.data.to.buffer.vi output -- the "buf" mark)
+  2. buffer.length   (same spot -- "buf" is TWO nodes, one per output)
+  3. eof             (the OUTPUT of the eof.good OR eof.bad gate)
+  4. cond            (the "Entire Message should be available now" RESULT --
+                      it decodes THIS tick's data.stream.data/byte-enables so
+                      it crosses the cut. Compute it from the RAW pre-node
+                      buffer.length, then register the result: one register
+                      per crossing, never two)
+  5. data.stream.Timestamp (bottom of frame, feeds recv.time ->
+                      TS-Filter.Command; unregistered, the output message
+                      carries the NEXT word's timestamp)
+  (optional 6th: the "debug only" data.stream branch -- no timing impact,
+   register only if debug records should align with their message)
+Labeled wires that get NOTHING: "State" (BATS.Parser.States) and "Header"
+(Hdr Length / Total Counter) -- both come out of the state cluster's shift
+register and are already registered; another node would skew them.
+Equivalent alternative: one node on a single branched data.stream cluster
+wire replaces the separate eof + Timestamp (+ debug) nodes = 4 total.
+Assumes the two new.uxx.be.vi calls (Message Length / Message Type) read the
+REGISTERED buffer. Alternative: leave them on the raw buffer and register
+their outputs instead (+2 nodes). Never both.
+The state-split variant (Read.Msg.Fill / Read.Msg.Parse) needs 0 nodes.
+
+--------------------------------------------------------------------------------
+CONSISTENCY RULE 2: mind the feedback loop through compress.buffer.vi
+--------------------------------------------------------------------------------
+The parse stage decides how many bytes were consumed, and that flows back
+into the buffer state for the next append. A register inside that loop
+changes WHEN the slide becomes visible, so the state machine must tolerate
+the one-tick delay.
+
+If reasoning that through gets hairy, use the trivially-correct alternative
+that produces the SAME hardware:
+
+  SPLIT THE Read.Msg STATE IN TWO:
+    Read.Msg.Fill  -- only appends (add.data.to.buffer.vi)
+    Read.Msg.Parse -- only parses the buffer and dispatches / writes output
+  The state cluster already recirculates through the loop's shift register,
+  so the "register in the middle" comes for free and nothing can misalign.
+
+Trade-off: the state split handles one 64-bit word every TWO ticks
+(~3.2 Gb/s sustained instead of 6.4). Fine for the PoC and for bursty market
+data with the FIFO in front. If sustained line rate matters later, do the
+Feedback Node version (true pipelining, one word per tick) instead.
+
+--------------------------------------------------------------------------------
+EXACT PLACEMENT LIST (evidence: every failing path in the routed report runs
+through CaseStructureFrame_0003 = the "Read.Msg" frame; the
+Read.Sequenced.Unit.Header frame is NOT implicated -- don't touch it)
+--------------------------------------------------------------------------------
+All three registers go inside ONE frame. LabVIEW note: inside an SCTL these
+are Feedback Nodes (the arrow-in-a-box element), not border shift registers;
+a Feedback Node inside a case frame only updates on ticks when that frame
+executes, which is what you want here.
+
+LOCATION: BATS.Parser.States case structure -> frame "Read.Msg"
+(bats.parser.pdf pages 2-3: the frame containing add.data.to.buffer.vi, the
+two new.uxx.be.vi calls, the inner message-type case structure, and
+compress.buffer.vi)
+
+REGISTER 1 -- the `buffer` wire.
+  Variable before the register: buffer (the 576-bit array output of
+  add.data.to.buffer.vi).
+  Place it immediately on that output, so ALL of these downstream readers
+  see the registered value:
+    - new.uxx.be.vi (the instance labeled Message Length)
+    - new.uxx.be.vi (the instance labeled Message Type)
+    - the inner message-type case structure's `buffer` input tunnel (the one
+      with frames "0, Default" Other/Unsupported, "20" Time,
+      "21, 22, 2F" AddOrder, "23, 24" OrderExecuted)
+    - compress.buffer.vi
+
+REGISTER 2 -- the `buffer.length` wire.
+  Variable before the register: buffer.length (the count output of the same
+  add.data.to.buffer.vi call).
+  Same placement, covering its readers: the "Entire Message should be
+  available now" comparison, the inner case structure's tunnel,
+  compress.buffer.vi, and the length math feeding the state-cluster bundle.
+
+REGISTER 3 -- a BRANCH of the `data.stream` cluster wire.
+  Variable before the register: data.stream (the input cluster: data /
+  data valid / byte enables / Timestamp / eof.good / eof.bad).
+  This one is a branch, not the whole wire: the original, unregistered
+  branch keeps feeding add.data.to.buffer.vi (it must append THIS tick's
+  bytes). The registered branch replaces the wires that currently feed:
+    - the data.stream.Timestamp unbundle that goes into the "Message Ready"
+      output cluster (recv.time, pdf page 3)
+    - the eof.good / eof.bad OR feeding the end-of-frame logic
+
+That's the complete list -- three Feedback Nodes, one frame, nothing
+anywhere else in the VI. The two new.uxx.be.vi calls and the inner case
+structure do NOT get their own registers; they just read the registered
+wires (that's what makes them stage 2).
+
+TWO CHECKS BEFORE RE-EXPORT:
+  1. Initializer terminals: give each Feedback Node a sensible initial value
+     (empty buffer, length 0, zeroed cluster) so the first tick after reset
+     doesn't parse garbage.
+  2. The compress.buffer.vi loop (Rule 2): since compress.buffer.vi now
+     reads the registered buffer, its slid result reaches the state cluster
+     one tick later than before. Trace that the state machine doesn't append
+     new data in the very next tick expecting the slide to already be
+     visible -- if it does, it needs a one-tick wait, or fall back to the
+     Read.Msg.Fill / Read.Msg.Parse state split (zero Feedback Nodes, same
+     hardware, no alignment risk).
+
+--------------------------------------------------------------------------------
+!! 2026-07-21 UPDATE: THE FEEDBACK-NODE PLAN ABOVE FAILED ON HARDWARE --
+   USE THE STATE SPLIT INSTEAD (this supersedes the placement list above)
+--------------------------------------------------------------------------------
+Observed: with the 5 Feedback Nodes placed, parsing inserted one EMPTY 8-byte
+word right after the Sequenced Unit Header. Two causes, both inherent to
+Feedback Nodes placed INSIDE a case frame:
+
+  1. ENTRY BUBBLE: on the first Read.Msg tick after leaving
+     Read.Sequenced.Unit.Header, add.data.to.buffer.vi appends the real
+     first word, but every Feedback Node outputs its INITIALIZER (empty
+     buffer / 0 / zeroed cluster) -- a Feedback Node in a case frame outputs
+     what it held at its previous execution, and this is its first. The
+     parse side processes one empty snapshot = one phantom word, exactly
+     where it was seen.
+  2. WRITE-BACK SKEW: compress.buffer.vi slides by what the parse stage
+     consumed from the OLD snapshot while add.data.to.buffer.vi already
+     appended into the NEW one -- committed buffer.length and contents can
+     skew one word, misaligning every later message.
+
+FIX (do this): remove the 5 Feedback Nodes and split Read.Msg into
+Fill / Parse phases -- the register comes from the state cluster's existing
+shift register, which carries values ACROSS frames and has no entry bubble:
+  - Add a phase: either a new state Read.Msg.Parse, or a boolean `phase`
+    in the state cluster toggled each Read.Msg tick.
+  - FILL tick:  assert Ready.for.Udp.Input, run add.data.to.buffer.vi,
+                NO parsing, NO output writes, NO compress.buffer.vi.
+  - PARSE tick: deassert Ready.for.Udp.Input (upstream FIFO holds the next
+                word via the valid/ready handshake), do NOT append, run
+                extraction + message case + compress.buffer.vi + outputs on
+                the committed state.
+No bubbles (parse always sees state committed by a completed fill tick), no
+skew (append and consume never touch the buffer in the same tick).
+Cost: one word per two ticks (~3.2 Gb/s sustained) -- fine for the PoC.
+
+If one-word-per-tick is ever required: the Feedback-Node version needs
+(a) a `snapshot.valid` boolean registered alongside the buffer, initialized
+False, so parse skips the entry-bubble tick, and (b) the slide applied to
+the POST-APPEND buffer using the consume-count from the registered parse
+(safe: appends only add at the tail). Real pipeline-control design, easy to
+get subtly wrong -- prefer the ring-buffer redesign below at that point,
+plus parsing the 8-byte Sequenced Unit Header DIRECTLY off data.stream.data
+(it is exactly one 64-bit word at constant offsets = free wiring; never put
+it through the 576-bit buffer).
+
+--------------------------------------------------------------------------------
+IF STILL SHORT AFTER THIS (unlikely at -0.25 ns)
+--------------------------------------------------------------------------------
+The deeper redesign from advice.txt FIX #3: replace compress.buffer.vi with a
+read-position pointer kept in a shift register, so the buffer never physically
+slides. Removes the slide logic entirely instead of pipelining around it.
+
+--------------------------------------------------------------------------------
+REBUILD FLOW AFTER THE LABVIEW EDIT
+--------------------------------------------------------------------------------
+1. Re-export from LabVIEW (produces NiFpgaAG_poc_ip_kria.dcp under
+   /mnt/c/NIFPGA/compilation/.../source_files/).
+2. Convert the checkpoint to a netlist the BD can consume:
+     open_checkpoint .../NiFpgaAG_poc_ip_kria.dcp
+     write_verilog -force -mode design vivado/ip/NiFpgaAG_poc_ip_kria.v
+3. Rebuild -- the clean step is MANDATORY, make xsa does not track the
+   netlist and silently no-ops without it:
+     make xsa-clean && make xsa
+4. Verify: post-route WNS in
+   vivado/mktdata_poc/mktdata_poc.runs/impl_1/
+   kr260_starter_kit_wrapper_timing_summary_routed.rpt
+   should be >= 0. Cross-clock pairs should all stay
+   "Ignored / Max Delay Datapath Only" in report_clock_interaction.
+================================================================================

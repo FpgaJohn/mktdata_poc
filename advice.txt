@@ -1,0 +1,107 @@
+================================================================================
+WHAT TO DO IN LABVIEW -- PLAIN-LANGUAGE HOW-TO
+Market Data PoC parser timing fixes (KR260)
+================================================================================
+This is the "what to click and wire in LabVIEW" version of recommendations.txt.
+Do them in order. After each one, recompile and check whether WNS improved
+(WNS = Worst Negative Slack; you want it to reach 0 or positive).
+
+The one rule of thumb behind all of this:
+  Every number wired into a new.uxx.be "Start.Idx" or "Length" terminal should
+  be a CONSTANT, never a computed or case-selected wire. A constant offset
+  compiles to nearly-free wiring; a computed offset compiles to a big, slow
+  barrel shifter. If you trace a Start.Idx wire back and it comes out of a Case
+  selector or a calculation, that is the one making it slow.
+
+
+--------------------------------------------------------------------------------
+FIX #1 -- WITHDRAWN: "Inline subVI" DOES NOT EXIST ON FPGA TARGETS
+--------------------------------------------------------------------------------
+Earlier versions of this file said to check VI Properties -> Execution ->
+"Inline subVI into calling VIs" on new.uxx.be.vi. That checkbox is NOT there
+for a VI under an FPGA target -- it is a desktop/RT execution-system feature,
+and LabVIEW FPGA has no inline option at all (there is a still-open NI Idea
+Exchange request asking for one:
+https://forums.ni.com/t5/LabVIEW-FPGA-Idea-Exchange/INLINE-VI-S-for-FPGA/idi-p/1226742).
+
+It also turns out not to matter. In LabVIEW FPGA every subVI call already
+compiles to its own hardware (per-instance circuits; the call boundary is
+"simply a wiring operation" per NI). What makes an extractor cheap is a
+CONSTANT offset: when Start.Idx/Length are compile-time constants at the call
+site, LabVIEW folds the barrel shifters away WITH NO INLINE SETTING. This
+design proves it -- 7 of the 10 new.uxx.be instances have constant offsets and
+compiled to about a third of the logic of the 3 with computed offsets
+(verified in the exported VHDL: the 7 folded clones have no Start_Idx port).
+
+So: skip this "fix" entirely and go straight to Fix #2, which is the real one.
+
+
+--------------------------------------------------------------------------------
+FIX #2 -- AddOrder.vi : GIVE Quantity/Symbol/Price CONSTANT OFFSETS
+--------------------------------------------------------------------------------
+Open AddOrder.vi and find the Case structure that switches on message type
+(frames 0x21 / 0x22 / 0x2F  =  long / short / expanded).
+
+The problem fields are SYMBOL, PRICE, and QUANTITY. Their byte position/length
+differs in each message variant:
+
+  Symbol   starts at byte 19 (long), 17 (short), 19 (expanded)
+  Price    starts at byte 25 (long), 23 (short), 27 (expanded)
+  Quantity is 4 bytes (long/expanded) but 2 bytes (short)
+
+What to do:
+  - Put a new.uxx.be call for Symbol / Price / Quantity INSIDE each of the three
+    case frames, and in that frame wire the offset and length as DIAGRAM
+    CONSTANTS (numbers you type right there). For example, Price:
+        0x21 (long) frame:      Price = new.uxx.be(buffer.in, 25, 8)
+        0x22 (short) frame:     Price = new.uxx.be(buffer.in, 23, 2)
+        0x2F (expanded) frame:  Price = new.uxx.be(buffer.in, 27, 8)
+    Do the same for Symbol and Quantity. Each frame's output wire is the
+    extracted value, joining the tunnel that feeds OrderBook.Command.
+  - Do NOT let the Case structure pick an offset NUMBER and feed it to one
+    shared new.uxx.be sitting outside (or shared across) the frames. That shared
+    call is what becomes the slow barrel shifter.
+  - LEAVE THE COMMON FIELDS ALONE: Message Type (1), Time (2), Order Id (6),
+    Side (14) are the same offset in all three variants, so they are already
+    fine.
+
+You are trading 3 "any-offset" extractors for ~9 fixed-offset ones inside the
+Case structure that already exists. Fixed-offset extractors are nearly free, so
+this is a net win and adds NO latency.
+
+
+--------------------------------------------------------------------------------
+FIX #3 -- bats.parser.vi BUFFER  (the bigger job; do last, only if still short)
+--------------------------------------------------------------------------------
+Today bats.parser keeps the whole message buffer in a shift register and every
+iteration it:
+  (a) tacks new bytes on with add.data.to.buffer.vi, and
+  (b) slides the used bytes off the front with compress.buffer.vi.
+Sliding the whole ~72-byte buffer every tick is expensive.
+
+Cheaper approach (removes compress.buffer entirely):
+  - Instead of physically sliding bytes, keep a "read position" number in a
+    shift register and just move it forward as you consume bytes. Read fields
+    relative to that position. You stop rebuilding the whole buffer each cycle.
+
+Simpler partial win if the above is too much of a redesign:
+  - Add a Feedback Node to split the work across two loop iterations -- e.g.
+    extract the fields in one tick, then do the price/quantity math and the
+    buffer update in the next tick. Each tick does less work, so it runs faster.
+    Costs one extra cycle of latency per message, which is fine for market data.
+
+
+--------------------------------------------------------------------------------
+ORDER TO TACKLE THEM
+--------------------------------------------------------------------------------
+1. Fix #2 (AddOrder constant offsets) -> recompile, check WNS.
+   (Fix #1 is withdrawn -- no inline option exists on FPGA targets, and none is
+   needed; constant offsets fold on their own.)
+2. Fix #3 (buffer redesign) only if WNS is still negative.
+
+After you re-export the IP, the critical-path timing can be re-checked on the
+KR260 build to confirm the logic depth dropped and WNS closed.
+
+(For the full technical background -- routed-timing evidence, why these are the
+hotspots, and the FPGA-level detail -- see recommendations.txt.)
+================================================================================

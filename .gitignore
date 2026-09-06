@@ -31,3 +31,6 @@ apps/mktdata_poc_test/fifo16
 *.swp
 *~
 .DS_Store
+
+# Vim session state
+Session.vim

@@ -1,0 +1,378 @@
+================================================================================
+NI LabVIEW FPGA IP — TIMING / LATENCY REDUCTION RECOMMENDATIONS
+Market Data PoC (KR260, xck26-sfvc784-2LV-c)
+================================================================================
+
+Generated from analysis of the routed KR260 implementation
+(kr260_starter_kit_wrapper_routed.dcp) cross-referenced against the LabVIEW
+VHDL source export on the NAS
+(\\192.168.1.163\nas\work\fpganow\Market.Data.PoC\compilation\source.*).
+
+--------------------------------------------------------------------------------
+CONTEXT
+--------------------------------------------------------------------------------
+- NOTE ON THE NUMBERS BELOW: the WNS/slack/logic-level/CDC figures are AS
+  MEASURED on one specific routed checkpoint (kr260_starter_kit_wrapper_routed.dcp)
+  at the time this was written. They are not re-run on every export. The RTL
+  STRUCTURE claims (which VIs are variable shifters, the 576-bit buffer machinery,
+  7-of-10 extractors folded) are confirmed against the exported VHDL and are
+  stable; the exact nanosecond figures should be re-measured (report_timing on the
+  current routed .dcp) before quoting them as current.
+- NI's own compile of this logic PASSES timing (100 MHz + 156.28 MHz) but on the
+  USRP-X410 part (xczu28dr). Our target is the KR260 xck26 "2LV" (low-voltage,
+  slower) grade, where the same datapath does not close.
+- Post-route WNS on the KR260 build: about -2.5 ns.
+- Of the worst 400 paths, only 19 are real intra-clock datapath violations; all
+  19 are on clk_pl_0 (100 MHz, 10 ns budget). The other 381 are cross-clock/CDC
+  paths that need async clock-group constraints, NOT pipelining.
+- Worst datapath: 11.5 ns / 24 logic levels, -2.0 ns slack, running from
+  FPGAwFIFOn4 -> [parser logic] -> FPGAwFIFOn1 (one iteration of the parser
+  Timed Loop). Delay split: logic 40%, routing 60%.
+
+--------------------------------------------------------------------------------
+THE CORE PROBLEM: DATA-DEPENDENT BARREL SHIFTERS ON WIDE VECTORS
+--------------------------------------------------------------------------------
+Every hot VI is built around VARIABLE-amount Logical Shifts, which LabVIEW
+compiles into barrel shifters (deep mux trees). Constant shifts are free wiring;
+variable shifts are the expensive part.
+
+new_uxx_be.vi  (field extractor -- 10 instances, #1 contributor)
+  - 13 Logical Shifts each = 7 constant (free) + 6 variable (barrel shifters).
+  - The 6 variable shift amounts all derive from the runtime input Start_Idx:
+        Start_Idx -> subtract -> Left_Shift_in_bytes -> x8 ->
+        Left_Shift_in_bits -> cShift of a 64-bit barrel shifter (chained).
+  - Each extractor = ~6 cascaded variable barrel shifters aligning a field pulled
+    from the 576-bit (72-byte) buffer. This chain IS the 24-level, -2 ns path.
+    With 10 instances it dominates the whole IP.
+
+add_data_to_buffer.vi
+  - Appends data_stream to the 576-bit buffer at a variable position = a
+    576-bit-wide variable shift every cycle.
+
+zero_out_and_convert.vi
+  - Variable mask-shift (x << y) plus Num_of_True (a popcount / adder tree) to
+    zero out bytes past a length, producing u64_be.
+
+reverse.u64.vi
+  - Pure bit reordering; essentially free (ignore it).
+
+--------------------------------------------------------------------------------
+LABVIEW REFACTORS, BY PAYOFF
+--------------------------------------------------------------------------------
+
+1. TURN VARIABLE FIELD OFFSETS INTO COMPILE-TIME CONSTANTS  (BIGGEST WIN)
+   new_uxx_be is a generic "extract Length bytes at Start_Idx" VI fed a computed /
+   running offset -- that is why it becomes a barrel shifter. But in BATS/PITCH,
+   every field's offset within a message type is FIXED (e.g. AddOrder price is
+   always at the same byte). Call the extractor with LITERAL CONSTANT offsets per
+   field (or make specialized fixed-offset extractor VIs using a constant Array
+   Subset / slice). All 6 variable shifts then collapse to constant shifts and the
+   barrel shifters DISAPPEAR ENTIRELY instead of just being pipelined. Fix the one
+   VI / calling pattern and all 10 instances benefit.
+
+2. PIPELINE WHATEVER MUST STAY VARIABLE
+   If some offsets are genuinely data-dependent (a variable-length field precedes
+   them), insert a Feedback Node register inside new_uxx_be between the shift-amount
+   computation and the barrel shift, splitting the 6-deep chain. One internal
+   register roughly halves the depth and applies to all 10 instances.
+   Cost: +1 cycle latency per extraction.
+
+3. STOP RE-SHIFTING THE WHOLE 576-BIT BUFFER IN add_data_to_buffer
+   Writing incoming bytes into FIXED byte lanes selected by a REGISTERED write
+   pointer (a demux to fixed positions) is far cheaper than a 576-bit
+   variable shift-and-OR every cycle.
+
+4. SHRINK THE BUFFER IF POSSIBLE
+   576 bits is wide to mux/shift each tick; every shifter scales with it. If the
+   parser only needs a sliding window of recent bytes, a narrower buffer shrinks
+   all of them proportionally.
+
+5. REGISTER THE POPCOUNT + MASK-SHIFT in zero_out_and_convert
+   So the adder tree (Num_of_True) is not in the same combinational sweep as the
+   field extraction.
+
+6. SPLIT AddOrder.vi INTO TWO TIMED-LOOP STAGES
+   Field extraction in stage 1, arithmetic + buffer update in stage 2.
+
+--------------------------------------------------------------------------------
+BOTTOM LINE
+--------------------------------------------------------------------------------
+The design is dominated by ~6 cascaded variable barrel shifters x 10 extractors,
+all fed by computed byte offsets. The highest-leverage change by far is #1 --
+make the offsets constant (protocol fields are fixed-position), which REMOVES the
+deep logic rather than pipelining around it. Do that, and the -2 ns on clk_pl_0
+should close with room to spare.
+
+--------------------------------------------------------------------------------
+SEPARATE ISSUE (not pipelining): CROSS-CLOCK PATHS
+--------------------------------------------------------------------------------
+381 of the worst 400 paths are cross-clock (100 <-> 156.28 MHz and ethernet GT
+crossings). These are NOT datapath-depth problems and will not be fixed by
+pipelining. They need async clock-group constraints (set_clock_groups
+-asynchronous) on the KR260 side, which NI's X410 flow already applies. Add these
+after re-pipelining so the timing report shows only the real datapath violations.
+
+--------------------------------------------------------------------------------
+VERIFY AFTER RE-EXPORT
+--------------------------------------------------------------------------------
+After reworking the VIs and re-exporting the IP, re-run the same critical-path
+extraction (report_timing on the routed checkpoint, filtered to clk_pl_0
+intra-clock paths) to confirm logic levels dropped and slack closed.
+================================================================================
+
+
+================================================================================
+APPENDIX A -- WHAT "WNS" MEANS
+================================================================================
+WNS = Worst Negative Slack.
+
+It is the single worst (most negative) timing slack across every path in the
+design after place-and-route. Slack = (time available) - (time needed):
+  - Positive slack -> the path MEETS timing (signal arrives with margin).
+  - Negative slack -> the path FAILS timing (signal arrives too late).
+
+So WNS is the margin on your single most critical path. Our KR260 build had
+WNS = -2.5 ns: the worst path needs about 2.5 ns more than the clock period
+allows. For the -2.0 ns path on clk_pl_0, the logic took 11.5 ns against a
+10 ns (100 MHz) budget.
+
+Related terms seen in the reports:
+  - TNS  = Total Negative Slack -- the sum of negative slack over ALL failing
+           endpoints (ours was about -5900 ns). WNS = how bad the worst path is;
+           TNS = how many paths fail and by how much combined.
+  - WHS / THS = Worst / Total HOLD Slack -- same idea but for hold (minimum-
+           delay) timing. Ours were positive (hold met).
+
+Goal: WNS >= 0 (all setup paths met). That is what the pipelining/refactoring
+work in this document is aiming to achieve.
+
+
+================================================================================
+APPENDIX B -- new.uxx.be.vi : DETAILED BLOCK-DIAGRAM ANALYSIS + REFACTOR
+================================================================================
+*** PARTIALLY SUPERSEDED BY APPENDIX C (read Appendix C after this). ***
+*** CORRECTION: this appendix says all 10 new.uxx.be instances are variable   ***
+*** barrel shifters. That is WRONG. Source inspection shows LabVIEW already    ***
+*** constant-folds 7 of the 10 (no Start_Idx port); only 3 (Clone21/22/26)     ***
+*** are genuinely variable. The dominant cost is the 576-bit buffer machinery  ***
+*** (add.data.to.buffer + compress.buffer), NOT new.uxx.be. See Appendix C.    ***
+
+Source: C:\work\fpganow\Market.Data.PoC\submodules\Market.Data.Bats.Parser\
+        fpga\new.uxx.be.vi  (10 instances; 7 already folded, 3 variable)
+
+WHAT IT DOES AND WHY IT IS DEEP
+-------------------------------
+Reading the block diagram + its indicators, this is a fully-general RUNTIME byte
+extractor. Its own comment: "chop off 'Length' bytes starting at index
+'Start.Idx' ... can span across 2 WORDS in 'buffer (U64)'." Concretely it:
+
+  1. Takes 'buffer' as an ARRAY of U64 (9 words = the 576-bit buffer).
+  2. From 'Start.Idx' computes Left Shift (in bytes) -> Left Shift (in bits)
+     (x8), and indexes the array to grab First.Word + Second Word (two adjacent
+     U64s, because a field can straddle a word boundary).
+  3. BARREL-SHIFTS First/Second word by that variable bit amount, builds
+     Mask / Mask 2 / Mask 3, and recombines -> aligned value.
+  4. A 'Big.Endian?' Case -> inside it a 'Length' Case (0/1/2/4/6/8) that
+     keeps-and-reverses N bytes.
+
+Every bolded step is variable-driven, so each becomes a mux / barrel shifter --
+and this runs 10x in the parser. That is the source of the 24-level path.
+
+HOW TO REFACTOR IT (in order of impact)
+---------------------------------------
+1. FEED CONSTANTS AT THE CALL SITES -- the big one.
+   [CORRECTION: this step originally also said to check VI Properties ->
+   Execution -> "Inline subVI into calling VIs". That checkbox DOES NOT EXIST
+   for VIs under an FPGA target, and is not needed -- see Appendix D.]
+   The VI is generic, but in BATS/PITCH every field in a given message has a
+   FIXED offset, FIXED length, and FIXED endianness. If those three inputs are
+   constants at the call, LabVIEW can fold the whole thing away:
+     - At each call site (AddOrder / bats_parser), wire Start.Idx, Length, and
+       Big.Endian? as DIAGRAM CONSTANTS, not computed values.
+   Result: Left Shift (in bits) becomes constant -> the barrel shifters vanish;
+   the buffer index becomes constant -> First.Word/Second Word are fixed wires;
+   the Length and Big.Endian? cases collapse to the single selected frame. The
+   VI reduces to fixed byte-select wiring + one reverse -- essentially free.
+
+2. ALIGN BY BYTE, NOT BY BIT.
+   It computes Left Shift (in bits) = bytes x 8 and does a BIT-level shift on a
+   U64. Since fields are byte-aligned, a 64-wide bit barrel shifter is overkill
+   -- a byte select (8-way mux) does the same job for a fraction of the logic.
+   If any path must stay variable, shift/select on a BYTE array, never the bit
+   vector.
+
+3. USE A FLAT BYTE-ARRAY BUFFER INSTEAD OF AN ARRAY OF U64.
+   The entire "spans across 2 WORDS / First.Word + Second.Word + shift +
+   recombine" machinery exists ONLY because the buffer is U64-word-granular. If
+   the buffer were an array of U8, then "Length bytes at Start.Idx" is a single
+   Array Subset -- no two-word split, no bit shift. (Pairs with the
+   add.data.to.buffer refactor.)
+
+4. IF AN OFFSET GENUINELY VARIES AT RUNTIME, PIPELINE IT.
+   For a field that follows a variable-length field, Start.Idx really is
+   data-dependent. There, split the index math from the shift/mask with a
+   Feedback Node register placed inside new.uxx.be itself. +1 cycle
+   latency, but breaks the chain.
+
+THE DECISIVE QUESTION
+---------------------
+At the call sites in AddOrder, is Start.Idx a CONSTANT per field, or a
+running/accumulated offset?
+  - If constant (or can be made constant): refactor #1 alone likely closes
+    timing outright.
+  - If a running sum: use #1 for the fixed-offset fields and #4 for the rest.
+Need to see AddOrder.vi (or bats_parser.vi) to confirm how Start.Idx / Length
+are driven.
+================================================================================
+
+
+================================================================================
+APPENDIX C -- bats.parser.vi : ARCHITECTURE ANALYSIS + CORRECTED PRIORITIES
+================================================================================
+Source: C:\work\fpganow\Market.Data.PoC\submodules\Market.Data.Bats.Parser\
+        fpga\bats.parser.vi
+This appendix supersedes the priorities in Appendix B.
+
+WHAT bats.parser.vi ACTUALLY IS
+-------------------------------
+A streaming STATE MACHINE (Reset -> Read.Sequenced.Unit.Header -> Read.Msg/Data
+-> Noop) carrying a large shift-register state: a 576-bit 'buffer' plus
+buffer.length, buffer.start, counters, MessageType, MessageLength, saved state.
+Each pass it:
+  1. APPENDS incoming bytes to the buffer            -> add.data.to.buffer.vi
+  2. EXTRACTS Message Length (byte 0) and Message Type (byte 1) with CONSTANT
+     offsets 0/1 (header fields at 0/2)              -> new.uxx.be.vi
+  3. DISPATCHES on message type (0x21/22/2F -> AddOrder.vi, 0x23/24 ->
+     OrderExecuted.vi, 0x20 -> Time.vi, else Unsupported)
+  4. REALIGNS the buffer after consuming a message   -> compress.buffer.vi
+
+CORRECTION TO APPENDIX B
+------------------------
+Appendix B claimed all 10 new.uxx.be instances are variable barrel shifters.
+Source port lists show otherwise:
+  - 7 of 10 are ALREADY constant-folded by LabVIEW (no Start_Idx input port) --
+    the fixed-offset calls (Message Type/Length, header fields). Already cheap.
+  - Only 3 are genuinely variable (Clone21/22/26 keep a Start_Idx input port).
+    Those 3 are the real barrel shifters.
+So "inline to fold constants" is a SMALLER win than Appendix B implied (most are
+already folded), and new.uxx.be is not the whole story.
+
+THE REAL STRUCTURAL HOTSPOT: THE 576-BIT BUFFER MACHINERY
+---------------------------------------------------------
+The worst path (-2.0 ns) runs:
+  buffer register -> 64-bit CARRY8 arithmetic -> zero_out_and_convert (u64_be)
+  -> add.data.to.buffer -> next buffer register.
+Every cycle does TWO 576-bit variable-position operations back-to-back:
+  - add.data.to.buffer.vi : appends at the variable buffer.length position
+    (a 576-bit variable mux built from case structures).
+  - compress.buffer.vi    : a 576-bit NiLvLogicalShift that shifts consumed
+    bytes out to realign (source: inputs buffer[575:0], buffer_length,
+    start_idx; instantiates NiLvLogicalShift).
+Two 72-byte-wide barrel-shift-class ops per cycle, plus the u64_be conversion
+arithmetic in between, ARE the 24-level chain -- more than the extractors.
+
+REVISED RECOMMENDATIONS (by impact)
+-----------------------------------
+1. KILL compress.buffer WITH A RING BUFFER + READ POINTER.
+   Instead of physically shifting consumed bytes out of a 576-bit vector every
+   cycle, keep a byte array and ADVANCE A READ INDEX. Removes the widest
+   variable shifter in the design outright. (Fields then read relative to the
+   pointer.)
+
+2. PIPELINE THE BUFFER APPEND AND THE u64_be CONVERSION.
+   Register between add.data.to.buffer, the CARRY8 arithmetic in
+   zero_out_and_convert, and the next buffer write -- they are all in one
+   combinational sweep today.
+
+3. FIX THE 3 VARIABLE EXTRACTORS (new.uxx.be Clone21/22/26).
+   The only remaining barrel-shifter new.uxx.be calls. If their Start.Idx is
+   variable because a PRECEDING FIELD IS VARIABLE-LENGTH -> pipeline them. If it
+   is variable only because extraction is relative to a running position ->
+   normalizing each message to index 0 lets them fold like the other 7.
+
+4. NARROW THE BUFFER if 72 bytes is more than needed concurrently -- every
+   576-bit mux/shifter scales down with it.
+
+5. PIPELINE THE STATE MACHINE (append -> identify type -> dispatch/extract ->
+   compress) across loop iterations so no single tick does all of it.
+
+KEY BLOCKER -- RESOLVED (see Appendix D)
+----------------------------------------
+AddOrder.vi has now been analyzed. The 3 variable extractors are Quantity /
+Symbol / Price, variable only because their offset/length differs across the
+AddOrder sub-types (long/short/expanded). They CAN be folded to constants.
+Details and fix in Appendix D.
+================================================================================
+
+
+================================================================================
+APPENDIX D -- AddOrder.vi : WHY EXACTLY 3 EXTRACTORS ARE VARIABLE + THE FIX
+================================================================================
+Source: C:\work\fpganow\Market.Data.PoC\submodules\Market.Data.Bats.Parser\
+        fpga\message.types\AddOrder.vi
+
+THE FINDING
+-----------
+AddOrder has three sub-types (long 0x21, short 0x22, expanded 0x2F). The
+new.uxx.be offset/length constants per field:
+
+  Field         long(0x21)   short(0x22)   expanded(0x2F)   Varies?
+  -----------   ----------   -----------   --------------   -------------------
+  Message Type  1,1          1,1           1,1              constant
+  Time offset   2,4          2,4           2,4              constant
+  Order Id      6,8          6,8           6,8              constant
+  Side          14,1         14,1          14,1             constant
+  Quantity      15,4         15,2          15,4             LENGTH varies (4/2/4)
+  Symbol        19,6         17,6          19,8             OFFSET+LEN vary
+  Price         25,8         23,2          27,8             OFFSET+LEN vary
+
+Every field offset is a compile-time CONSTANT -- except Quantity's length and
+Symbol's/Price's offset, which differ across the three sub-types. The design
+muxes those parameters by message type and feeds ONE new.uxx.be per field, so
+that input becomes runtime-variable -> a barrel shifter. Three fields with a
+case-selected parameter = exactly the three variable clones (21/22/26). The
+other 7 extractors have identical offsets across all variants, so LabVIEW folds
+them.
+
+(Field table confirmed on AddOrder.vi page 2 -- Add Order (long): Length@0,
+MsgType@1, Time@2, OrderId@6, Side@14, Quantity@15, Symbol@19, Price@25,
+AddFlags@33; total 34 bytes.)
+
+THE FIX (no pipelining, no added latency)
+-----------------------------------------
+Give each of Quantity / Symbol / Price a PER-SUB-TYPE CONSTANT offset+length
+instead of a case-muxed value:
+  - Do the extraction INSIDE the message-type case frames (0x21 / 0x22 / 0x2F)
+    so each new.uxx.be call sees literal constants, e.g.
+        Price = new.uxx.be(buffer, 25, 8)   in the long frame
+        Price = new.uxx.be(buffer, 23, 2)   in the short frame
+        Price = new.uxx.be(buffer, 27, 8)   in the expanded frame
+    rather than one call fed a case-selected offset.
+  - No inline setting is needed (or possible): the "Inline subVI into calling
+    VIs" checkbox does not exist for VIs under an FPGA target -- it is a
+    desktop/RT feature, and LabVIEW FPGA has no inline option (open NI Idea
+    Exchange request: forums.ni.com idi-p/1226742). Folding is caused by the
+    constant offset alone: each FPGA subVI call compiles to its own per-instance
+    circuit, and the 7 extractors with constant offsets folded with no inline
+    setting (confirmed in the exported VHDL -- they have no Start_Idx port).
+    Wire the constants in the case frames and recompile; verify the 3 clones
+    lose their Start_Idx port in the new export.
+
+You trade 3 variable barrel shifters for ~9 constant extractors muxed by the
+case structure that ALREADY exists. Constant extractors are essentially free
+(byte-select wiring + one reverse). All 10 new.uxx.be then become wires; the
+whole field-extraction layer collapses and much routing congestion with it.
+
+CAVEAT -- THIS ALONE WILL NOT FULLY CLOSE WNS
+---------------------------------------------
+The AddOrder fix removes the extractor barrel shifters (which dominated many
+near-critical paths), but the SINGLE WORST path is the 576-bit buffer machinery
+from Appendix C: add.data.to.buffer (append) + compress.buffer (realign) + the
+u64_be conversion arithmetic. That path is independent of the extractors, so it
+still needs the ring-buffer / pipeline work (Appendix C rec #1-2).
+Realistically: AddOrder constant-offset fix + buffer-machinery refactor together
+close it.
+================================================================================
+
+
+

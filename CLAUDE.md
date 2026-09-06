@@ -43,9 +43,9 @@ Common overrides: `KR260_HOST=...`, `KR260_UART=/dev/ttyUSB2` (else auto-detecte
 | `vivado/` | Project TCL, build TCL, merged `constraints.xdc`, and all RTL in `vivado/ip/` |
 | `apps/mktdata_poc_bm/` | Bare-metal exerciser (Vitis Classic, standalone BSP, JTAG-loaded) |
 | `apps/mktdata_poc_rtos/` | Same tests under FreeRTOS (`freertos10_xilinx` BSP) |
-| `apps/mktdata_poc_test/` | Linux userspace exerciser (UIO + /proc/self/pagemap, runs as root on the board) |
+| `apps/mktdata_poc_test/` | Linux userspace exerciser (UIO + /proc/self/pagemap, runs as root on the board). Subcommands: `test` (the three self-tests), `reset` (pulse NI IP reset via axi_gpio_1 — triggers a DEBUG burst), `debug`/`mdebug`/`cmd` (poll one capture FIFO and hex-dump frames), `poll [names…]` (all three, one thread each) |
 | `kria_app/` | dfx-mgr/xmutil runtime-loadable package (bif, dtso, shell.json); see `INSTALL.md` |
-| `scripts/` | Board-side helper scripts; `make board-setup` scp's+chmods them, `make board-info` runs list_uio.sh. Notable: `setup_host.sh` (reserve hugepages), `gpio.sh` / `fifo_probe.sh` (drive the accumulator / FIFO echo via `devmem` only — exercise the PL without the compiled test), `mod_probe.sh` (rebind `uio_pdrv_genirq` with `of_id=generic-uio`), `load_app.sh`/`update_app.sh`/`list_apps.sh` (xmutil app management) |
+| `scripts/` | Board-side helper scripts; `make board-setup` scp's+chmods them, `make board-info` runs list_uio.sh. Notable: `setup_host.sh` (reserve hugepages), `gpio.sh` / `fifo_probe.sh` (drive the accumulator / FIFO echo via `devmem` only — exercise the PL without the compiled test), `mod_probe.sh` (rebind `uio_pdrv_genirq` with `of_id=generic-uio`), `load_app.sh`/`update_app.sh`/`list_apps.sh`/`list_uio.sh` (xmutil app management + inventory), `run_test.sh` (`sudo ./mktdata_poc_test test`) |
 | `vitis/boot_jtag.tcl` | JTAG boot helper |
 | `todo.txt` | Running design-decision log — the authoritative record of *why* things are the way they are (the LPD control-plane move, the `simple_fifo` swap). Read it before changing the BD |
 | `recommendations.txt` / `advice.txt` / `advice.pipeline.txt` | LabVIEW-IP timing-closure playbook (untracked). `advice.pipeline.txt` is the current action item: where to put the Feedback Node in `bats.parser.vi` to close the remaining -0.25 ns (exact wire, consistency rules, rebuild flow). `recommendations.txt` is the routed-DCP analysis (root cause: data-dependent barrel shifters from variable field offsets in `new_uxx_be`/`AddOrder`/`add_data_to_buffer`); `advice.txt` is the click-by-click LabVIEW version. Per-VI screenshots in the root `*.pdf` (`new.uxx.be.pdf`, `AddOrder.pdf`, `add.data.to.buffer.pdf`, `zero.out.and.convert.pdf`, …). The fixes are made in LabVIEW and re-exported, never here |
@@ -81,6 +81,7 @@ The block design also contains a self-test path independent of Ethernet: a **FIF
 - Register PIO from Linux userspace (UIO mmap) to the PL **narrows to 32-bit** on the APU→HPM path regardless of BD widths — even explicit `str x` to a fully 64-bit AXI path loses the high word. Move real 64-bit data with the DMA engine; `simple_fifo`'s paired 32-bit pushes are the PIO ceiling.
 - The shared **HPM0_LPD master must stay 32-bit** (it defaults to 32; the TCL does not override it — do not add a wider `PSU__MAXIGP2__DATA_WIDTH`). A 64/128-bit master breaks the dual-channel GPIO (ch2 `+0x08` addend writes vanish) and the `axi_interconnect` 64→32 downsizer drops writes to the high half of a 64-bit word (`addr[2]=1`, e.g. DMA `CURDESC_MSB`).
 - Replacing `slave_axi_mux` with smartconnect is dead: smartconnect caps at 16 MI for mixed-width slaves and we have 18.
+- 64-bit **reads** are safe (todo.txt #23): the RX-only capture FIFOs' `RDFD` (AXI4 memory-mapped, byte-addressed) returns full uncorrupted 64-bit words — the load splits into `+0x1000`/`+0x1004` halves of the same beat. Validated on real NI IP traffic.
 
 ### PS Address Map (HPM0_LPD)
 
@@ -96,7 +97,7 @@ Shared by all apps and the device-tree overlay; must match `vivado/mktdata_poc.t
 
 (`apps/mktdata_poc_test/main.c` also maps the market-data debug FIFOs and `axi_gpio_1` in the same aperture: `axi_fifo_mdebug` `0x80050000`, `axi_fifo_debug` `0x80070000`, `axi_fifo_cmd` `0x800A0000`, `axi_gpio_1` `0x80090000`, each ctrl/data 0x10000 apart.)
 
-If you change the address map in the BD, update `apps/*/main.c` and `kria_app/mktdata_poc.dtso` to match.
+DMA data-path masters reach DDR via **S_AXI_HPC0** (`PSU__AFI0_COHERENCY=1`, `dma-coherent` in the dtso); `axi_dma_echo` uses `c_addr_width=49` and maps `HPC0_DDR_HIGH` because the Linux hugepage can sit above 4 GB. The deprecated Xilinx `axi_fifo_echo` (`axi_fifo_mm_s`) cell still exists in the BD self-looped at `0x80110000` but is unused. If you change the address map in the BD, update `apps/*/main.c` and `kria_app/mktdata_poc.dtso` to match.
 
 ### Clock Domains
 
@@ -114,7 +115,7 @@ If you change the address map in the BD, update `apps/*/main.c` and `kria_app/mk
 
 ## Board Workflow Notes
 
-- The Kria runtime flow (no reflash): `make kria-build kria-stage kria-deploy-staged kria-load-app` (or do the install/load steps manually: move the package to `/lib/firmware/xilinx/` and `sudo xmutil unloadapp && sudo xmutil loadapp mktdata_poc`). Verify with `/sys/class/fpga_manager/fpga0/state` → `operating` and `/dev/uio*` entries. Details in `kria_app/INSTALL.md`.
+- The Kria runtime flow (no reflash): `make kria-build kria-stage kria-deploy-staged kria-load-app`; `make kria-reload-app` does an unload+load in one step when the package is already deployed (or do the install/load steps manually: move the package to `/lib/firmware/xilinx/` and `sudo xmutil unloadapp && sudo xmutil loadapp mktdata_poc`). Verify with `/sys/class/fpga_manager/fpga0/state` → `operating` and `/dev/uio*` entries. Details in `kria_app/INSTALL.md`.
 - **dfx-mgr wedges on redeploy** ("remove from slot 0 returns: -1"): clear with `sudo rmdir /sys/kernel/config/device-tree/overlays/mktdata_poc_image_*` on the board, then reload the app.
 - The userspace test needs hugepages: `echo 8 | sudo tee /proc/sys/vm/nr_hugepages` (or run `scripts/setup_host.sh` on the board, which the DMA-echo path's 2 MiB hugepage depends on).
 - **To return to Linux after a JTAG (bare-metal/FreeRTOS) session, power-cycle the board.** `make jtag-reboot` (a JTAG `rst -system`) is *not* reliable for this — the bare-metal session latches a halt-on-reset (reset-catch) state in the A53 debug logic, so a soft system reset just re-halts the core at the reset vector (silent UART, no boot) instead of running BootROM→FSBL→U-Boot→Linux. That latched state survives JTAG disconnect and even killing `hw_server`; only a power-on reset clears it. The board has no boot-mode DIP switches — it boots Linux by default on every power cycle.

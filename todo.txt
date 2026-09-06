@@ -197,3 +197,28 @@
         NOT YET VERIFIED ON HARDWARE: a Feedback Node in the parser is the shape
         that produced the 2026-07-21 phantom-word bug (advice.pipeline.txt update).
         Re-run the board tests / parse a known pcap before calling this done.
+
+✅ 23 - [INVESTIGATION 2026-06-12; predates 21/22, renumbered from 21 in a rebase]
+        Do 64-bit READS from the RX-only capture FIFOs
+        (cmd/debug/mdebug) narrow/corrupt the way 64-bit register WRITES do (item 20)?
+        NO -- reads come back full and uncorrupted. Validated on REAL NI IP traffic
+        (no synthetic injection / no rebuild needed):
+          - Window A: `sudo ./mktdata_poc_test debug` (polls axi_fifo_debug, the RX-only
+            axi_fifo_mm_s w/ 64-bit AXI4 data port fed by the NI IP DEBUG stream; reads
+            RDFD via the production 64-bit keyhole `words[i] = d64[FIFO_AXI4_RDFD/8]`).
+          - Window B: `sudo ./mktdata_poc_test reset` (toggles axi_gpio_1 ->
+            NI IP ctrlind_17_ip_reset, which makes the IP emit a DEBUG burst).
+          - Result: the 4 expected 32-bit words appeared correctly. The read traversed
+            the exact suspect path -- CPU -> 32-bit M_AXI_HPM0_LPD -> slave_axi_mux ->
+            32->64 upsizer -> 64-bit FIFO -- and lost nothing.
+        WHY reads survive but writes (item 20) didn't: write-narrowing dropped the high
+        32 bits at register addresses where they had to land at addr[2]=1 (e.g.
+        CURDESC_MSB @ +0x0C). RDFD on the AXI4 (memory-mapped) data interface
+        (C_DATA_INTERFACE_TYPE=1) is a BYTE-ADDRESSED window, not a single-word keyhole:
+        the 64-bit load splits into +0x1000 (low) / +0x1004 (high), each reads its correct
+        half of the SAME beat, and the FIFO advances once. Both halves arrive.
+        CONCLUSION: reading cmd/debug/mdebug over the 64-bit RDFD path is SAFE on this
+        board. All three are configured identically (RX-only, 64-bit AXI4), so this
+        carries over to cmd and mdebug. (Still gate RLR on RDFO -- the SIGBUS-on-empty
+        quirk is unrelated to width.) The planned axis_const read-narrowing rebuild is
+        therefore unnecessary and was dropped.
